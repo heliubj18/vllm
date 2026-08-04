@@ -1,0 +1,25 @@
+# Pipeline for a self-hosted buildkite-agent running directly on macOS
+# (no docker). Point your Buildkite pipeline's initial step at:
+#   buildkite-agent pipeline upload .buildkite/local-pipeline.yaml
+#
+# This is NOT part of vLLM upstream CI - it only exists to exercise the
+# GitHub -> Buildkite -> local agent path on a dev machine.
+
+agents:
+  queue: local-mac
+
+env:
+  UV_PYTHON: "3.12"
+  PRE_COMMIT_HOME: "$HOME/.cache/pre-commit-bk"
+
+steps:
+  - label: ":mag: Environment"
+    command: .buildkite/local-scripts/env-info.sh
+
+  - label: ":lock: Lint (ruff + typos + spdx)"
+    command: .buildkite/local-scripts/run-lint.sh
+
+  - wait: ~
+
+  - label: ":white_check_mark: Local CI green"
+    command: 'echo "all local steps passed"'
