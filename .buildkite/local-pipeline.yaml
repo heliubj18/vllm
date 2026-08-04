@@ -13,6 +13,12 @@ env:
   PRE_COMMIT_HOME: "$HOME/.cache/pre-commit-bk"
 
 steps:
+  - label: ":wave: Hello world"
+    command: |
+      echo "Hello world from $(hostname)"
+      echo "arch: $(uname -m)"
+      echo "branch: $BUILDKITE_BRANCH  commit: ${BUILDKITE_COMMIT:0:8}"
+
   - label: ":mag: Environment"
     command: .buildkite/local-scripts/env-info.sh
 
