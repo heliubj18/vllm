@@ -25,6 +25,9 @@ steps:
   - label: ":lock: Lint (ruff + typos + spdx)"
     command: .buildkite/local-scripts/run-lint.sh
 
+  - label: ":pytest: Unit tests"
+    command: .buildkite/local-scripts/run-unit-tests.sh
+
   - wait: ~
 
   - label: ":white_check_mark: Local CI green"
