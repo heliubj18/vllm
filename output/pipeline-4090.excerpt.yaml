@@ -1,0 +1,168 @@
+_note: 'Excerpt only. Full pipeline: pipeline-4090.sample.yaml. Selection report: selection-4090.sample.txt.'
+steps:
+- _example: auto, GPU, sharded pytest
+  group: Kernels
+  steps:
+  - label: Kernels Attention Test %N
+    key: kernels-attention-test
+    agents:
+      queue: gpu-4090
+    plugins:
+    - docker#v5.2.0:
+        image: vllm/vllm-openai:latest
+        always-pull: false
+        propagate-environment: true
+        pid: private
+        shm-size: 8gb
+        volumes:
+        - /data/hf_cache:/root/.cache/huggingface
+        gpus: all
+    commands:
+    - mkdir -p /vllm-workspace/test-reports
+    - export BUILDKITE_PARALLEL_JOB=${BUILDKITE_PARALLEL_JOB:-0}
+    - export BUILDKITE_PARALLEL_JOB_COUNT=${BUILDKITE_PARALLEL_JOB_COUNT:-1}
+    - export PYTEST_ADDOPTS="--junitxml=/vllm-workspace/test-reports/kernels-attention-test.xml -o junit_family=xunit2"
+    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - python3 /vllm-workspace/.buildkite/local-scripts/check_skip_ratio.py /vllm-workspace/test-reports/kernels-attention-test.xml
+      --max 0.9 --warn-only || true
+    artifact_paths: test-reports/**/*.xml
+    timeout_in_minutes: 130
+    env:
+      NCCL_CUMEM_HOST_ENABLE: '0'
+      VLLM_WORKER_MULTIPROC_METHOD: spawn
+      HF_HOME: /root/.cache/huggingface
+      HF_HUB_OFFLINE: '1'
+    concurrency_group: vllm-ci/gpu-4090/gpu
+    concurrency: 1
+    concurrency_method: eager
+- _example: auto, CPU-only (no gpus reserved)
+  group: Miscellaneous
+  steps:
+  - label: V1 Others (CPU)
+    key: v1-others-cpu
+    agents:
+      queue: gpu-4090
+    plugins:
+    - docker#v5.2.0:
+        image: vllm/vllm-openai:latest
+        always-pull: false
+        propagate-environment: true
+        pid: private
+        shm-size: 8gb
+        volumes:
+        - /data/hf_cache:/root/.cache/huggingface
+    commands:
+    - mkdir -p /vllm-workspace/test-reports
+    - export BUILDKITE_PARALLEL_JOB=${BUILDKITE_PARALLEL_JOB:-0}
+    - export BUILDKITE_PARALLEL_JOB_COUNT=${BUILDKITE_PARALLEL_JOB_COUNT:-1}
+    - export PYTEST_ADDOPTS="--junitxml=/vllm-workspace/test-reports/v1-others-cpu.xml -o junit_family=xunit2"
+    - pytest -v -s -m 'cpu_test' v1/core
+    - pytest -v -s v1/structured_output
+    - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s v1/test_kv_cache_spec_registry.py
+    - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
+    - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'cpu_test' v1/metrics
+    - python3 /vllm-workspace/.buildkite/local-scripts/check_skip_ratio.py /vllm-workspace/test-reports/v1-others-cpu.xml
+      --max 0.9 --warn-only || true
+    artifact_paths: test-reports/**/*.xml
+    env:
+      NCCL_CUMEM_HOST_ENABLE: '0'
+      VLLM_WORKER_MULTIPROC_METHOD: spawn
+      HF_HOME: /root/.cache/huggingface
+      HF_HUB_OFFLINE: '1'
+    concurrency_group: vllm-ci/gpu-4090/cpu
+    concurrency: 2
+    concurrency_method: eager
+- _example: auto, no pytest (no junit/skip-ratio wrapper)
+  group: Torch ABI
+  steps:
+  - label: Torch Stable ABI Audit
+    key: torch-stable-abi-audit
+    agents:
+      queue: gpu-4090
+    plugins:
+    - docker#v5.2.0:
+        image: vllm/vllm-openai:latest
+        always-pull: false
+        propagate-environment: true
+        pid: private
+        shm-size: 8gb
+        volumes:
+        - /data/hf_cache:/root/.cache/huggingface
+        gpus: all
+    commands:
+    - python3 /vllm-workspace/.buildkite/check-torch-abi.py
+    timeout_in_minutes: 10
+    env:
+      NCCL_CUMEM_HOST_ENABLE: '0'
+      VLLM_WORKER_MULTIPROC_METHOD: spawn
+      HF_HOME: /root/.cache/huggingface
+      HF_HUB_OFFLINE: '1'
+    concurrency_group: vllm-ci/gpu-4090/gpu
+    concurrency: 1
+    concurrency_method: eager
+- _example: 'manual: block step gating its test step'
+  group: Plugins
+  steps:
+  - block: Run Plugin Tests (2 GPUs)
+    key: block-plugin-tests-2-gpus
+    prompt: 4 file(s) spawn a server; 35min > auto_max_minutes=20; run-all
+  - label: Plugin Tests (2 GPUs)
+    key: plugin-tests-2-gpus
+    agents:
+      queue: gpu-4090
+    plugins:
+    - docker#v5.2.0:
+        image: vllm/vllm-openai:latest
+        always-pull: false
+        propagate-environment: true
+        pid: private
+        shm-size: 8gb
+        volumes:
+        - /data/hf_cache:/root/.cache/huggingface
+        workdir: /vllm-workspace/tests
+        gpus: all
+    commands:
+    - mkdir -p /vllm-workspace/test-reports
+    - export BUILDKITE_PARALLEL_JOB=${BUILDKITE_PARALLEL_JOB:-0}
+    - export BUILDKITE_PARALLEL_JOB_COUNT=${BUILDKITE_PARALLEL_JOB_COUNT:-1}
+    - export PYTEST_ADDOPTS="--junitxml=/vllm-workspace/test-reports/plugin-tests-2-gpus.xml -o junit_family=xunit2"
+    - pip install -e ./plugins/vllm_add_dummy_platform
+    - pytest -v -s plugins_tests/test_platform_plugins.py
+    - pip uninstall vllm_add_dummy_platform -y
+    - pytest -v -s ./plugins_tests/test_io_processor_plugins.py
+    - pip install -e ./plugins/prithvi_io_processor_plugin
+    - pytest -v -s plugins_tests/test_terratorch_io_processor_plugins.py
+    - pip uninstall prithvi_io_processor_plugin -y
+    - pip install -e ./plugins/bge_m3_sparse_plugin
+    - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
+    - pip uninstall bge_m3_sparse_plugin -y
+    - pip install -e ./plugins/colbert_query_plugin
+    - pytest -v -s plugins_tests/test_colbert_query_io_processor_plugins.py
+    - pip uninstall colbert_query_plugin -y
+    - pip install -e ./plugins/vllm_add_dummy_stat_logger
+    - pytest -v -s plugins_tests/test_stats_logger_plugins.py
+    - pip uninstall dummy_stat_logger -y
+    - pip install -e ./plugins/vllm_add_dummy_endpoint_plugin
+    - pytest -v -s plugins_tests/test_endpoint_plugins.py
+    - pip uninstall vllm_add_dummy_endpoint_plugin -y
+    - pytest -v -s plugins_tests/test_scheduler_plugins.py
+    - pip install -e ./plugins/vllm_add_dummy_model
+    - pytest -v -s distributed/test_distributed_oot.py
+    - pytest -v -s plugins_tests/test_oot_registration_online.py
+    - pytest -v -s plugins_tests/test_oot_registration_offline.py
+    - pytest -v -s plugins_tests/lora_resolvers
+    - python3 /vllm-workspace/.buildkite/local-scripts/check_skip_ratio.py /vllm-workspace/test-reports/plugin-tests-2-gpus.xml
+      --max 0.9 --warn-only || true
+    artifact_paths: test-reports/**/*.xml
+    timeout_in_minutes: 70
+    env:
+      NCCL_CUMEM_HOST_ENABLE: '0'
+      VLLM_WORKER_MULTIPROC_METHOD: spawn
+      HF_HOME: /root/.cache/huggingface
+      HF_HUB_OFFLINE: '1'
+    concurrency_group: vllm-ci/gpu-4090/gpu
+    concurrency: 1
+    concurrency_method: eager
+    depends_on: block-plugin-tests-2-gpus

@@ -28,6 +28,13 @@ steps:
   - label: ":pytest: Unit tests"
     command: .buildkite/local-scripts/run-unit-tests.sh
 
+  # Selects which upstream test_areas steps this hardware can run and appends
+  # them to the current build, where the gpu-4090 agent picks them up. Not
+  # gated behind the steps above so a lint failure does not hide the selection.
+  - label: ":pipeline: Generate 4090 pipeline"
+    key: generate-4090-pipeline
+    command: .buildkite/local-scripts/upload-4090-pipeline.sh
+
   - wait: ~
 
   - label: ":white_check_mark: Local CI green"

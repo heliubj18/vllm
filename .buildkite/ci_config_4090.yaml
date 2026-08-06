@@ -1,0 +1,214 @@
+# Config for the local 4090 Buildkite pipeline.
+#
+# Consumed by .buildkite/local-scripts/gen_pipeline.py, which reads the
+# upstream step definitions in .buildkite/test_areas/ (never modified) and
+# emits a Buildkite pipeline targeting the local agents.
+#
+# This is NOT part of vLLM upstream CI.
+
+hardware:
+  # Shown in the selection summary. Set per platform so the report identifies
+  # which agent config produced it.
+  name: 2x4090
+  # Number of GPUs available on the test agent. Steps needing more are dropped.
+  gpu_count: 2
+  # Compute capability of the test agent (4090 = 8.9). Used for reporting only;
+  # actual gating is via filter.arch_blocklist below.
+  arch: sm89
+  queue_gpu: gpu-4090
+  queue_bootstrap: local-mac
+
+# Image the test steps run in. Must contain a built vLLM at /vllm-workspace
+# with SM89 kernels compiled in.
+image: "vllm/vllm-openai:latest"
+
+filter:
+  # Steps pinned to hardware we do not have. A step with no `device:` field is
+  # kept: upstream routes those to its L4 pool, which is also SM89 + 24GB.
+  arch_blocklist:
+    - h100
+    - h200
+    - h200_18gb
+    - h200_35gb
+    - b200
+    - b200-k8s
+    - a100
+    - gh200
+    - dgx-spark
+    - ascend_npu
+    - intel_cpu
+    - intel_hpu
+    - intel_gpu
+    - arm_cpu
+    - amd_cpu
+    - zen5
+
+  # Device-name prefixes to exclude, for families with many variants. `mi*`
+  # covers every AMD GPU (mi250, mi300, mi325, ...); drop this on an AMD agent.
+  arch_blocklist_prefixes:
+    - mi
+
+  # Fallback only, for steps whose pytest targets cannot be resolved statically
+  # (shell wrappers, generated arg lists). Everything else is tiered by `cost`.
+  auto_max_minutes: 20
+
+  # A 4090 is slower than upstream's H200/H100, so scale the timeouts up.
+  timeout_multiplier: 2.0
+
+  # When non-empty, only these step keys are considered (debugging aid).
+  step_allowlist: []
+
+  # Steps excluded regardless of the rules above. Keep a reason on each entry.
+  step_denylist:
+    # The PD scripts run an unfiltered `pkill -9 -f "vllm serve"`. Safe inside a
+    # container's PID namespace, but verify the docker plugin does not share the
+    # host PID namespace before enabling these.
+    - nixlconnector-pd-edge-cases-2-gpus
+    - multiconnector-nixl-offloading-pd-accuracy-2-gpus
+    - multiconnector-nixl-offloading-pd-edge-cases-2-gpus
+    - hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
+    # Needs the CI image build pipeline, which this setup does not run.
+    - docker-build-metadata
+
+  # Emit a manual (block) step for tests the diff did not select, so they can
+  # still be triggered by hand. Set false to omit them entirely.
+  block_unselected: true
+
+# How a step's cost is estimated. Upstream's `timeout_in_minutes` is not used as
+# the primary signal: it is sized to include cold model downloads on upstream's
+# own network, so it measures bandwidth more than work. Model data is pre-staged
+# on the 4090 host and mounted into the container, so what remains is how a test
+# obtains its model, which the generator reads out of the test source:
+#
+#   T0  no model touched at all, or the step runs no pytest
+#   T1  in-process tests over a handful of models
+#   T2  loads weights into VRAM (LLM(...)/vllm_runner), or compiles in most files
+#   T3  spawns `vllm serve` per test, or sweeps many distinct models
+#
+# Timeout is consulted only for steps that stand up a server, where startup and
+# readiness polling are real cost that pre-staged weights do not remove and that
+# the source does not reveal. Those use filter.auto_max_minutes above. A step
+# that never starts a server is judged purely on its tier.
+cost:
+  # Highest tier that still runs automatically. Everything above becomes a
+  # manual (block) step.
+  auto_max_tier: T2
+
+  # Distinct-model count at which a step is treated as a sweep (T3) regardless
+  # of mechanism. Each distinct model is one more load into VRAM.
+  many_models: 20
+
+  # Always run these, whatever the tier or diff says. For coverage that must not
+  # regress silently: kernel correctness on SM89 is the reason this agent exists,
+  # and a kernel break is both likely to be caught here and cheap to run.
+  # Overrides the tier gate and changed-file selection, but not the hardware
+  # layer above - a step needing 4 GPUs stays excluded regardless.
+  must_run:
+    # 38 in-process files, no engine, no server. Pure kernel compute.
+    - kernels-attention-test
+    # 51 files. Covers the fused MoE path this fork changes most often.
+    - kernels-moe-test
+    # 44 files. SM89 quantization kernels (marlin/gptq/awq).
+    - kernels-quantization-test
+
+# Any changed file matching these runs the full selected set, ignoring per-step
+# source_file_dependencies. Mirrors upstream's run_all_patterns.
+#
+# Keep this list narrow: anything here defeats incremental selection. The two
+# CI entries cover changes to the selection logic itself, so a config or
+# generator edit is validated against every viable step.
+run_all_patterns:
+  - setup.py
+  - CMakeLists.txt
+  - csrc/
+  - cmake/
+  - requirements/
+  - .buildkite/ci_config_4090.yaml
+  - .buildkite/local-scripts/gen_pipeline.py
+
+run_all_exclude_patterns:
+  - csrc/cpu/
+  - csrc/rocm/
+  - cmake/hipify.py
+  - cmake/cpu_extension.cmake
+
+# Injected into every generated test step.
+env:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  NCCL_CUMEM_HOST_ENABLE: "0"
+  VLLM_WORKER_MULTIPROC_METHOD: spawn
+  # Where the mount above lands. Keep in step with docker.volumes.
+  HF_HOME: /root/.cache/huggingface
+  # Models are pre-staged, so a cache miss is a staging bug. Failing fast beats
+  # silently pulling tens of GB mid-test and blowing the step's timeout. Set to
+  # "0" when deliberately adding a model to the cache.
+  HF_HUB_OFFLINE: "1"
+
+# Serializing execution on the test agent.
+#
+# Buildkite dispatches steps in parallel by default. Upstream can allow that
+# because it routes each step shape to its own elastic queue (gpu_1_queue,
+# gpu_4_queue) where concurrent steps land on separate machines. Here every step
+# targets one box and asks the docker plugin for `gpus: all`, so two concurrent
+# steps would contend for the same VRAM - showing up as OOMs and NCCL failures
+# that look like flaky tests.
+#
+# Buildkite has three ordering tools and only one fits:
+#   depends_on  - expresses "B needs A's result". Wrong tool: these steps are
+#                 independent, and a chain of 26 would also serialize the CPU
+#                 steps needlessly and make one failure block the rest.
+#   wait        - a pipeline-wide barrier. Too coarse, and it does not limit
+#                 anything within a group of parallel steps.
+#   concurrency - caps how many jobs from a group run at once, across builds.
+#                 This is the resource-contention tool, so it is what we use.
+concurrency:
+  # Set false to emit no concurrency keys, e.g. if the agent already runs with
+  # spawn=1 and you would rather rely on that.
+  enabled: true
+
+  # Groups are organization-wide, so the queue name is folded into the group to
+  # keep different hardware from blocking each other.
+  group_prefix: vllm-ci
+
+  # GPU steps that may run at once. Keep at 1 unless the box has enough VRAM for
+  # two concurrent steps - a step asks for all GPUs, not a slice.
+  gpu_slots: 1
+
+  # CPU-only steps do not touch VRAM so they can overlap with GPU work, but they
+  # still share host RAM and cores.
+  cpu_slots: 2
+
+# Settings for the docker plugin on the *test* agent. The generating agent never
+# runs docker; it only serializes these into the pipeline it uploads, and the GPU
+# agent's docker plugin consumes them.
+docker:
+  # Pull the image on every run. Leave false while iterating on a local image.
+  always_pull: false
+  # Docker's default 64MB is not enough for vLLM's multiprocessing.
+  shm_size: "8gb"
+  # Host mounts. Model data is pre-staged on the test host; this makes it visible
+  # inside the container. Paths are on the GPU agent, not on the machine running
+  # this generator - adjust the host side to wherever the models actually live.
+  #
+  # Must be read-write, not :ro. vLLM's weight loader takes a filelock inside the
+  # cache dir (weight_utils.get_lock) and huggingface_hub writes refs and blob
+  # symlinks even on a cache hit, so a read-only mount fails every model test.
+  volumes:
+    - "/data/hf_cache:/root/.cache/huggingface"
+
+report:
+  # Where each step writes its JUnit XML. Must sit under the checkout the docker
+  # plugin mounts, otherwise artifact_paths cannot see it from the host.
+  junit_dir: /vllm-workspace/test-reports
+  # Absolute path to the guard script inside the container.
+  checker_path: /vllm-workspace/.buildkite/local-scripts/check_skip_ratio.py
+  # Buildkite artifact glob. Results are uploaded even when a step fails.
+  artifact_paths: "test-reports/**/*.xml"
+  # Fail a step when this fraction of its collected tests was skipped. A 4090
+  # skips every sm90+/sm100-gated test, and pytest exits 0 in that case, so
+  # without this check an all-skipped run looks green.
+  #
+  # Values must be calibrated per step on real hardware. Until then the check
+  # runs in warn-only mode.
+  skip_ratio_enforce: false
+  skip_ratio_default: 0.9
