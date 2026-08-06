@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Generate a Buildkite pipeline for a self-hosted agent from upstream steps.
 
 Reads the step definitions in .buildkite/test_areas/ (upstream files, never

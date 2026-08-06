@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Fail when too large a fraction of a JUnit report was skipped.
 
 A 4090 is SM89, so every test gated on sm90+/sm100 is skipped. pytest exits 0
