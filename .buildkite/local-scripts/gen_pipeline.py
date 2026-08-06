@@ -116,8 +116,20 @@ def load_config(path: Path) -> dict[str, Any]:
 
 MODEL_RE = re.compile(r"""["']([A-Za-z0-9][\w.-]*/[\w.-]+)["']""")
 _NOT_A_MODEL = (
-    ".py", ".json", ".yaml", ".yml", ".txt", ".so", ".safetensors", ".jinja",
-    ".md", ".csv", ".sh", ".cu", ".h", ".toml",
+    ".py",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".txt",
+    ".so",
+    ".safetensors",
+    ".jinja",
+    ".md",
+    ".csv",
+    ".sh",
+    ".cu",
+    ".h",
+    ".toml",
 )
 _SERVER_RE = re.compile(r"RemoteOpenAIServer")
 _ENGINE_RE = re.compile(r"\bLLM\(|AsyncLLM|vllm_runner|hf_runner")
@@ -396,10 +408,9 @@ def classify(
     if step.optional:
         return Verdict(step, MANUAL, "upstream marks it optional")
 
-    over_tier = (
-        cost.tier in TIER_ORDER
-        and TIER_ORDER.index(cost.tier) > TIER_ORDER.index(auto_max_tier)
-    )
+    over_tier = cost.tier in TIER_ORDER and TIER_ORDER.index(
+        cost.tier
+    ) > TIER_ORDER.index(auto_max_tier)
 
     if cost.spawns_server:
         # Timeout can only narrow the auto set here, never widen it past the
@@ -486,9 +497,7 @@ def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     # `--shard-id= --num-shards=` and fail at collection, so define them as the
     # single-shard case. Harmless for steps that do not shard.
     out.append("export BUILDKITE_PARALLEL_JOB=${BUILDKITE_PARALLEL_JOB:-0}")
-    out.append(
-        "export BUILDKITE_PARALLEL_JOB_COUNT=${BUILDKITE_PARALLEL_JOB_COUNT:-1}"
-    )
+    out.append("export BUILDKITE_PARALLEL_JOB_COUNT=${BUILDKITE_PARALLEL_JOB_COUNT:-1}")
     # PYTEST_ADDOPTS applies to every pytest process the step spawns, including
     # the ones launched from upstream's shell wrappers.
     out.append(f'export PYTEST_ADDOPTS="--junitxml={junit} -o junit_family=xunit2"')
