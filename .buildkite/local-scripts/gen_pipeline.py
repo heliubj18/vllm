@@ -562,6 +562,10 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
         "pid": "private",
         # vLLM's multiprocessing needs more shared memory than docker's 64MB.
         "shm-size": docker.get("shm_size", "8gb"),
+        # The serving images set ENTRYPOINT to `vllm serve`, which swallows the
+        # step's commands as its own arguments and exits 125 before anything
+        # runs. Override it so the commands reach a shell.
+        "entrypoint": docker.get("entrypoint", "bash"),
     }
     if docker.get("volumes"):
         plugin["volumes"] = list(docker["volumes"])

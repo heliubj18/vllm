@@ -216,6 +216,11 @@ docker:
   # Docker's default 64MB is not enough for vLLM's multiprocessing.
   shm_size: "8gb"
 
+  # The serving images set ENTRYPOINT to `vllm serve`. Without overriding it the
+  # step's commands are parsed as arguments to that (the shell's -c became
+  # --compilation-config) and every job exits 125 before running anything.
+  entrypoint: "bash"
+
   # Which GPUs a test step may use. NOT "all": this host has 8 RTX 4090s and
   # other people run jobs on some of them, so seizing every device would OOM
   # their work. Pin to the two this agent owns. Keep in step with
