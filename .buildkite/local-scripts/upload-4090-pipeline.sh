@@ -33,8 +33,10 @@ git fetch --no-tags --depth=50 origin \
     "${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}" 2>/dev/null ||
   echo "WARNING: could not fetch origin/${BASE_BRANCH}; generator will run-all"
 
-# PyYAML is the generator's only dependency. Keep the venv outside the repo so
-# the agent's `git clean -ffxdq` does not delete it between jobs.
+# PyYAML and regex are the generator's only dependencies; regex is required
+# because check_forbidden_imports.py forbids the stdlib `re`. Keep the venv
+# outside the repo so the agent's `git clean -ffxdq` does not delete it
+# between jobs.
 VENV="$HOME/.cache/vllm-bk-gen-venv"
 if [[ ! -d "$VENV" ]]; then
   echo "--- Creating generator venv at ${VENV}"
@@ -42,7 +44,7 @@ if [[ ! -d "$VENV" ]]; then
 fi
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
-uv pip install -q pyyaml
+uv pip install -q pyyaml regex
 
 # Name outputs after the config, so several platform configs can run in the same
 # build without overwriting each other's artifacts.

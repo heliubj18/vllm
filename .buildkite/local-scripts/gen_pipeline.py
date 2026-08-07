@@ -24,13 +24,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import regex as re
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

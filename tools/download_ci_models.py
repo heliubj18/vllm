@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import regex as re
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEST = Path(os.environ.get("VLLM_CI_MODEL_DIR", ROOT / ".ci-models"))
@@ -174,12 +175,12 @@ def download(model_id: str, source: str, dest: Path, revision: str | None) -> No
     print(f"DOWNLOAD {model_id} -> {target} [{source}]")
     if source == "huggingface":
         try:
-            from huggingface_hub import snapshot_download
+            import huggingface_hub
         except ImportError as exc:
             raise SystemExit(
                 "install huggingface_hub first: pip install huggingface_hub"
             ) from exc
-        snapshot_download(
+        huggingface_hub.snapshot_download(
             repo_id=model_id,
             local_dir=str(target),
             revision=revision,
