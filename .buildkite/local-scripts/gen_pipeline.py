@@ -545,8 +545,10 @@ def _concurrency(step: Step, config: dict[str, Any]) -> tuple[str | None, int]:
     """Return (concurrency_group, limit) for a step, or (None, 0) to leave it free.
 
     GPU steps share one group so only `gpu_slots` run at a time. CPU-only steps
-    get their own group: they do not touch VRAM, so they can run alongside GPU
-    work, but they still consume host RAM and CPU on the same box.
+    get their own group: they are handed the devices too (see emit_step - the
+    import needs one visible) but do not allocate VRAM, measured at 1 MiB while
+    running, so they can overlap GPU work. They still consume host RAM and CPU
+    on the same box, which is what cpu_slots bounds.
     """
     rules = config.get("concurrency") or {}
     if not rules.get("enabled", True):
@@ -625,14 +627,24 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
     # /vllm-workspace with "file or directory not found: v1/core". Default to
     # the same directory _resolve_targets() assumes.
     plugin["workdir"] = step.working_dir or DEFAULT_WORKING_DIR
-    # CPU-only steps still run in the container on the GPU host (upstream's
-    # commands assume Linux), but must not reserve the GPUs.
+    # Every step gets the GPUs, including the ones upstream marks CPU-only.
+    # Those markings mean "performs no GPU computation", not "runs without a
+    # visible device": importing vllm loads _C_stable_libtorch.abi3.so, which
+    # needs libcuda.so.1, so in a GPU-less container the import fails and the
+    # tests collapse into "Failed to infer device type" and pydantic
+    # ValidationErrors on ModelConfig. Build #15's V1 Others (CPU) came back
+    # 194 failed / 208 passed for exactly this reason; the same three tests
+    # pass with the devices attached and fail without them.
+    #
+    # Upstream is unaffected because its CPU steps run on a CPU-built image. We
+    # have one CUDA image for everything. CPU steps still take a cpu_slots
+    # concurrency slot rather than the single GPU one - see _concurrency() -
+    # since they only need the device present, not idle.
     #
     # `gpus` is configurable because a shared box may have GPUs other people are
     # using: "all" would seize every device on the host. Pin it to the devices
     # this agent owns, e.g. '"device=0,1"'.
-    if not _is_cpu_only(step):
-        plugin["gpus"] = docker.get("gpus", "all")
+    plugin["gpus"] = docker.get("gpus", "all")
 
     env = dict(config.get("env") or {})
     env.update(step.env)
