@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Stage HF-gated models from ModelScope into the HF cache layout.
 
 Two models the tests need are gated on huggingface.co and this account has no

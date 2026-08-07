@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Accumulate measured step durations from Buildkite build history.
 
 The cost tiers in ci_config_4090.yaml are inferred statically, by reading what
