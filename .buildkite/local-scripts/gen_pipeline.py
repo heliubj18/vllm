@@ -37,6 +37,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = REPO_ROOT / ".buildkite" / "ci_config_4090.yaml"
 DEFAULT_TEST_AREAS = REPO_ROOT / ".buildkite" / "test_areas"
 
+# Where a step runs when it declares no working_dir. Most upstream steps say
+# /vllm-workspace/tests explicitly and the rest still name paths relative to it,
+# so both the emitted workdir and the static target resolution use this.
+DEFAULT_WORKING_DIR = "/vllm-workspace/tests"
+
 
 # --------------------------------------------------------------------------
 # Upstream step model
@@ -177,7 +182,7 @@ def _resolve_targets(step: Step) -> list[str]:
     resolved statically (shell wrappers, generated arg lists), which the caller
     treats as "unknown" rather than "cheap".
     """
-    work = (step.working_dir or "/vllm-workspace/tests").replace("/vllm-workspace", "")
+    work = (step.working_dir or DEFAULT_WORKING_DIR).replace("/vllm-workspace", "")
     prefix = work.strip("/")
     collected: set[str] = set()
 
@@ -593,8 +598,13 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
         plugin["expand-volume-vars"] = True
     if docker.get("volumes"):
         plugin["volumes"] = list(docker["volumes"])
-    if step.working_dir:
-        plugin["workdir"] = step.working_dir
+    # Steps that omit working_dir still name paths relative to tests/, e.g.
+    # `pytest -m 'cpu_test' v1/core`. Upstream gets away with it because its
+    # image has the tests baked in and the plugin's own checkout mount lands on
+    # workdir. Here mount-checkout is off, so an unset workdir leaves pytest in
+    # /vllm-workspace with "file or directory not found: v1/core". Default to
+    # the same directory _resolve_targets() assumes.
+    plugin["workdir"] = step.working_dir or DEFAULT_WORKING_DIR
     # CPU-only steps still run in the container on the GPU host (upstream's
     # commands assume Linux), but must not reserve the GPUs.
     #
