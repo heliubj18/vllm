@@ -583,6 +583,38 @@ def _unescape_dollars(command: str) -> str:
     return command.replace("$$", "$")
 
 
+def _gpus_for(step: Step, config: dict[str, Any]) -> str:
+    """Which devices this step's container gets.
+
+    Upstream declares how many devices a step needs (`num_devices`), and until
+    now every step was handed the same string regardless - so a step needing one
+    card still had both attached, and two such steps could never share the box.
+    Sizing the allocation per step is what makes running two of them at once
+    possible at all.
+
+    The value must be decided here, at generation time. The docker plugin passes
+    it through verbatim - `args+=("--gpus" "${BUILDKITE_PLUGIN_DOCKER_GPUS:-}")`
+    in hooks/command:381 - and only volume paths get `eval echo`, so a `$VAR` in
+    this field reaches docker as a literal and the container fails to start. The
+    same constraint rules out giving each shard of a `parallelism` step its own
+    card: shards share one step definition, so they would share one device string.
+
+    Falls back to `gpus` when no per-count entry matches, which keeps configs that
+    never set `gpus_by_devices` behaving exactly as before.
+    """
+    docker = config.get("docker") or {}
+    default = docker.get("gpus", "all")
+
+    by_count = docker.get("gpus_by_devices") or {}
+    if not by_count:
+        return default
+    # CPU-only steps still need a visible device (importing vllm loads a .so that
+    # links libcuda.so.1), but never more than one, so they take the 1-device
+    # allocation rather than the default.
+    wanted = 1 if _is_cpu_only(step) else step.num_devices
+    return by_count.get(wanted, default)
+
+
 def _priority(step: Step, config: dict[str, Any]) -> int:
     """Dispatch order within the concurrency queue. Higher goes first.
 
@@ -661,9 +693,24 @@ def _concurrency(step: Step, config: dict[str, Any]) -> tuple[str | None, int]:
         limit = int(rules.get("cpu_slots") or 2)
         return f"{prefix}/{queue}/cpu", limit
 
-    # One GPU step at a time by default. Raising this only makes sense if the
-    # steps' num_devices sum to no more than the box's GPU count, which is not
-    # something this generator can guarantee, so it stays a manual choice.
+    # Steps needing a single card can be given their own group and run several at
+    # a time, once gpus_by_devices sizes their allocation down to one device -
+    # otherwise they would each hold every card and "several at a time" would just
+    # be VRAM contention.
+    #
+    # This does NOT compose into a safe total. Buildkite counts jobs per group and
+    # has no mutual exclusion between groups, so a 1-device step and a 2-device
+    # step can run together: three devices' worth of demand on two cards, with the
+    # 1-device step's card overlapping one of the pair. Cheap kernel tests coexist
+    # there (measured at 460 MiB), a step that loads weights would not. So
+    # gpu1_slots stays absent by default, and turning it on is a statement about
+    # the steps involved.
+    if step.num_devices <= 1 and rules.get("gpu1_slots") is not None:
+        return f"{prefix}/{queue}/gpu1", int(rules["gpu1_slots"])
+
+    # One multi-device step at a time. Raising this only makes sense if the steps'
+    # num_devices sum to no more than the box's GPU count, which is not something
+    # this generator can guarantee, so it stays a manual choice.
     limit = int(rules.get("gpu_slots") or 1)
     return f"{prefix}/{queue}/gpu", limit
 
@@ -743,7 +790,7 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
     # `gpus` is configurable because a shared box may have GPUs other people are
     # using: "all" would seize every device on the host. Pin it to the devices
     # this agent owns, e.g. '"device=0,1"'.
-    plugin["gpus"] = docker.get("gpus", "all")
+    plugin["gpus"] = _gpus_for(step, config)
 
     env = dict(config.get("env") or {})
     env.update(step.env)

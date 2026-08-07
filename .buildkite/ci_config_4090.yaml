@@ -319,6 +319,21 @@ concurrency:
   # image, which needs the image build step that does not exist yet.
   cpu_slots: 2
 
+  # How many single-device steps may run at once, in their own group. Commented
+  # out, so they currently share the gpu_slots queue and stay serial.
+  #
+  # Two reasons it is off rather than set to 2. First, it would do nothing today:
+  # the agent runs BUILDKITE_AGENT_SPAWN=1, so one agent claims one job at a time
+  # regardless of what Buildkite is willing to dispatch. Second, Buildkite has no
+  # mutual exclusion between groups, so a 1-device step could run alongside a
+  # 2-device step - three devices' worth of demand on two cards, sharing device 0.
+  # Kernel tests coexist there (460 MiB measured), a step that loads weights into
+  # that same card would not.
+  #
+  # So enabling this means: raise SPAWN on the agent, and accept the overlap or
+  # first partition the cards so the two groups cannot touch the same device.
+  # gpu1_slots: 2
+
 # Settings for the docker plugin on the *test* agent. The generating agent never
 # runs docker; it only serializes these into the pipeline it uploads, and the GPU
 # agent's docker plugin consumes them.
@@ -344,6 +359,23 @@ docker:
   # their work. Pin to the two this agent owns. Keep in step with
   # hardware.gpu_count above.
   gpus: '"device=0,1"'
+
+  # Per-step allocation, keyed by upstream's num_devices. A step that declares one
+  # device gets one card instead of both, which is what makes two of them able to
+  # share this box; steps declaring two fall through to `gpus` above.
+  #
+  # Of the 25 steps currently selected, 19 need GPUs and 9 of those need a single
+  # card - so this is the majority case, and until now each of them held both.
+  #
+  # CPU-marked steps also land on the 1-device entry. They allocate no VRAM
+  # (measured at 1 MiB) but do need a device visible, because importing vllm loads
+  # a .so linked against libcuda.so.1.
+  #
+  # Values are written literally into the pipeline: the docker plugin forwards this
+  # field verbatim (hooks/command:381) and only expands variables inside volume
+  # paths, so a '$VAR' here would reach docker as a literal string.
+  gpus_by_devices:
+    1: '"device=0"'
 
   # Copy these out of the read-only checkout mounts into the container before
   # the step's own commands run, instead of letting the tests execute straight
