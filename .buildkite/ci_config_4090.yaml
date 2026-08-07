@@ -18,9 +18,19 @@ hardware:
   queue_gpu: gpu-4090
   queue_bootstrap: local-mac
 
-# Image the test steps run in. Must contain a built vLLM at /vllm-workspace
-# with SM89 kernels compiled in.
-image: "vllm/vllm-openai:latest"
+# Image the test steps run in. Supplies the compiled vLLM (torch 2.13.0+cu130,
+# the .so extensions, CUDA runtime); the test code itself comes from the
+# checkout via docker.volumes below, because these images carry no tests/.
+#
+# Present locally on the test host, so always_pull stays false - the host's
+# docker directory has little room to spare.
+#
+# Caveat: this image's torch.cuda.get_arch_list() is
+# ['sm_75','sm_80','sm_86','sm_90','sm_100','sm_120'] - no sm_89. A 4090 is
+# SM89, so kernels run through sm_86 PTX forward-compatibility rather than
+# natively. Fine for exercising the pipeline; revisit before trusting the three
+# must-run kernel steps as SM89 coverage.
+image: "vllm/vllm-openai:nightly"
 
 filter:
   # Steps pinned to hardware we do not have. A step with no `device:` field is
@@ -137,12 +147,31 @@ env:
   # https://github.com/NVIDIA/nccl/issues/1838
   NCCL_CUMEM_HOST_ENABLE: "0"
   VLLM_WORKER_MULTIPROC_METHOD: spawn
-  # Where the mount above lands. Keep in step with docker.volumes.
-  HF_HOME: /root/.cache/huggingface
+
+  # Where the model mount lands. Kept on /models (a separate 3.5T NVMe with
+  # 1.5T free) because the root filesystem only has ~56G. Models are downloaded
+  # once and never deleted, so repeat runs are offline and fast.
+  #
+  # /models itself is shared with other users' data, so only the
+  # chengfeng-test subdirectory is mounted, never /models.
+  HF_HOME: /models/chengfeng-test
+
   # Models are pre-staged, so a cache miss is a staging bug. Failing fast beats
   # silently pulling tens of GB mid-test and blowing the step's timeout. Set to
   # "0" when deliberately adding a model to the cache.
   HF_HUB_OFFLINE: "1"
+
+  # The serving images ship pytest but none of the test plugins upstream's
+  # commands rely on (pytest-shard's --shard-id, pytest-timeout's --timeout,
+  # pytest-forked's --forked, plus tblib for pickling test exceptions). They are
+  # installed once into a persistent venv on the host, and put on the path here
+  # rather than by rewriting commands: upstream calls a bare `pytest`, and this
+  # generator never edits upstream command strings.
+  #
+  # The venv is created with --system-site-packages, so torch and the compiled
+  # vllm still come from the image. The image's torch (2.13.0+cu130) already
+  # matches what requirements/test/cuda.in pins, so nothing overwrites it.
+  PYTHONPATH: /test-venv/lib/python3.12/site-packages
 
 # Serializing execution on the test agent.
 #
@@ -186,15 +215,43 @@ docker:
   always_pull: false
   # Docker's default 64MB is not enough for vLLM's multiprocessing.
   shm_size: "8gb"
-  # Host mounts. Model data is pre-staged on the test host; this makes it visible
-  # inside the container. Paths are on the GPU agent, not on the machine running
-  # this generator - adjust the host side to wherever the models actually live.
+
+  # Which GPUs a test step may use. NOT "all": this host has 8 RTX 4090s and
+  # other people run jobs on some of them, so seizing every device would OOM
+  # their work. Pin to the two this agent owns. Keep in step with
+  # hardware.gpu_count above.
+  gpus: '"device=0,1"'
+
+  # Host mounts, all on the *test* agent. Two groups:
   #
-  # Must be read-write, not :ro. vLLM's weight loader takes a filelock inside the
-  # cache dir (weight_utils.get_lock) and huggingface_hub writes refs and blob
-  # symlinks even on a cache hit, so a read-only mount fails every model test.
+  # 1. The test code. The vllm/vllm-openai images are slim serving images and
+  #    carry no tests/ at all (upstream builds tests into the `test` stage of
+  #    docker/Dockerfile instead), so tests come from the Buildkite checkout.
+  #    Only tests/, .buildkite/ and pyproject.toml are mounted - never the
+  #    repository root. Mounting the root puts the checkout's own vllm/ source
+  #    directory on sys.path, where it shadows the compiled package in the
+  #    image and every kernel test dies with
+  #    "_OpNamespace '_C' object has no attribute gelu_fast".
+  #
+  # 2. Model data and the test-dependency venv, pre-staged on the host and kept
+  #    across runs. Read-write on purpose: vLLM's weight loader takes a filelock
+  #    inside the cache dir (weight_utils.get_lock) and huggingface_hub writes
+  #    refs and blob symlinks even on a cache hit, so :ro fails every model test.
+  #
+  # $BUILDKITE_BUILD_CHECKOUT_PATH is expanded by the agent, so the same config
+  # works for any build. Host and agent-container build paths are identical
+  # (/opt/buildkite/builds), which is what makes these mounts resolve correctly
+  # under docker-outside-of-docker.
   volumes:
-    - "/data/hf_cache:/root/.cache/huggingface"
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/tests:/vllm-workspace/tests:ro"
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/.buildkite:/vllm-workspace/.buildkite:ro"
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/pyproject.toml:/vllm-workspace/pyproject.toml:ro"
+    - "/root/chengfeng-test/test-venv:/test-venv"
+    - "/models/chengfeng-test:/models/chengfeng-test"
+    # Read-write, and inside the checkout: artifact_paths is resolved by the
+    # agent relative to the checkout, so the reports have to land there for the
+    # upload to find them. The other checkout mounts above are :ro.
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/test-reports:/vllm-workspace/test-reports"
 
 report:
   # Where each step writes its JUnit XML. Must sit under the checkout the docker

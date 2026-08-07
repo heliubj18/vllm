@@ -569,8 +569,12 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
         plugin["workdir"] = step.working_dir
     # CPU-only steps still run in the container on the GPU host (upstream's
     # commands assume Linux), but must not reserve the GPUs.
+    #
+    # `gpus` is configurable because a shared box may have GPUs other people are
+    # using: "all" would seize every device on the host. Pin it to the devices
+    # this agent owns, e.g. '"device=0,1"'.
     if not _is_cpu_only(step):
-        plugin["gpus"] = "all"
+        plugin["gpus"] = docker.get("gpus", "all")
 
     env = dict(config.get("env") or {})
     env.update(step.env)
