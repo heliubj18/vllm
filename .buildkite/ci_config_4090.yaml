@@ -76,13 +76,15 @@ filter:
   # staged from ModelScope (LLM-Research/Llama-3.2-1B) instead, hardlinked into
   # the HF cache layout the tests expect - see local-scripts/stage_from_modelscope.py.
   step_allowlist:
-    - kernels-attention-test        # $$ escaping, exit 4 at 0m4s
-    - kernels-moe-test              # same
-    - kernels-quantization-test     # same
-    - v1-others-cpu                 # GPU-less container, 194 failed
-    - basic-models-test-other-cpu   # same, ModuleNotFoundError: vllm._C
-    - model-runner-v2-distributed-2-gpus  # cupy shadowing; root cause still open
+    # Each entry carries the failure it is here to verify. GPU steps run one at a
+    # time, so an entry that has already passed is 2 hours of queue spent
+    # re-proving it - kernels-attention-test is deliberately absent for that
+    # reason, having passed at 119m25s in #17.
+    - kernels-moe-test              # timed out at 101m; timeout now x parallelism 5
+    - kernels-quantization-test     # missing Qwen3-30B-A3B-NVFP4 shard, now staged
     - engine-1-gpu                  # was blocked on gated Llama-3.2-1B, now staged
+    - v1-others-cpu                 # 30 failed, pydantic reports a missing repo
+    - model-runner-v2-distributed-2-gpus  # WorkerProc background exception, open
 
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
