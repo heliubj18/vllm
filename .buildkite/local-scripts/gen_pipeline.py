@@ -653,7 +653,11 @@ def _priority(step: Step, config: dict[str, Any]) -> int:
         return 0
 
     short_max = rules.get("short_max_minutes")
+    # Per shard upstream, so scale by parallelism to get the step's own cost -
+    # the same correction emit_step applies to the timeout it emits.
     timeout = step.timeout_in_minutes
+    if timeout:
+        timeout *= step.parallelism or 1
     if short_max and timeout and timeout <= int(short_max):
         return int(rules.get("short") or 5)
 
@@ -723,6 +727,17 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
     multiplier = float(rules.get("timeout_multiplier") or 1.0)
     timeout = step.timeout_in_minutes
     if timeout:
+        # Upstream's timeout is per shard, not per step. A step with
+        # `parallelism: 5` is five jobs upstream, each given this many minutes for
+        # a fifth of the tests; we drop parallelism and run all of them in one
+        # job, so the whole step needs the sum.
+        #
+        # Missing this timed out Kernels MoE in build #17: upstream 50 minutes
+        # times parallelism 5 is 250 minutes of work, we allowed 50 x 2.0 = 100,
+        # and the agent killed it at 101m01s with exit -1. Kernels Attention and
+        # Quantization survived only because their parallelism is 2, which the
+        # 2.0 multiplier happened to cover.
+        timeout *= step.parallelism or 1
         timeout = max(1, int(round(timeout * multiplier)))
 
     docker = config.get("docker") or {}
