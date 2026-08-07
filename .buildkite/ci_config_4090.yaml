@@ -79,6 +79,16 @@ filter:
     - hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
     # Needs the CI image build pipeline, which this setup does not run.
     - docker-build-metadata
+    # Seven `pip install -e ./plugins/...` calls, each paired with a later
+    # `pip uninstall`. Both halves are incompatible with how tests get into the
+    # container here: tests/ is mounted read-only, so building an editable wheel
+    # cannot write its build metadata ("Getting requirements to build editable
+    # did not run successfully", verified on the agent), and even with a
+    # writable mount the installs would mutate the image's site-packages, which
+    # is shared with every other concurrently-queued step. Upstream is fine
+    # because each step gets a throwaway container with the tests baked in.
+    # Revisit if these steps ever matter enough to justify a writable overlay.
+    - plugin-tests-2-gpus
 
   # Emit a manual (block) step for tests the diff did not select, so they can
   # still be triggered by hand. Set false to omit them entirely.
