@@ -570,6 +570,12 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
         # step's commands as its own arguments and exits 125 before anything
         # runs. Override it so the commands reach a shell.
         "entrypoint": docker.get("entrypoint", "bash"),
+        # Must accompany `entrypoint`. The plugin only injects its default
+        # shell (/bin/sh -e -c) when no entrypoint is set, so overriding the
+        # entrypoint alone hands the whole multi-line script to bash as a
+        # filename: "bash: mkdir -p /vllm-workspace/test-reports ..." and exit
+        # 127. Upstream commands assume bash, so -e -c under bash it is.
+        "shell": list(docker.get("shell") or ["-e", "-c"]),
     }
     # The plugin mounts the checkout over `workdir` by default. That puts the
     # checkout's own vllm/ source tree on sys.path, where it shadows the
