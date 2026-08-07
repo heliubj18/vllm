@@ -221,6 +221,12 @@ docker:
   # --compilation-config) and every job exits 125 before running anything.
   entrypoint: "bash"
 
+  # Do not let the plugin mount the whole checkout over workdir (its default).
+  # The volumes below mount tests/ and .buildkite/ deliberately; mounting the
+  # repository root as well would put the checkout's vllm/ source directory on
+  # sys.path, shadowing the image's compiled package.
+  mount_checkout: false
+
   # Which GPUs a test step may use. NOT "all": this host has 8 RTX 4090s and
   # other people run jobs on some of them, so seizing every device would OOM
   # their work. Pin to the two this agent owns. Keep in step with

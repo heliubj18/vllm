@@ -76,7 +76,11 @@ if command -v buildkite-agent >/dev/null 2>&1; then
   buildkite-agent artifact upload "$REPORT" || true
   buildkite-agent artifact upload "$OUT" || true
   echo "--- Uploading pipeline"
-  buildkite-agent pipeline upload "$OUT"
+  # --no-interpolation: the pipeline references $BUILDKITE_BUILD_CHECKOUT_PATH,
+  # which must resolve on the *test* agent. Without this the upload interpolates
+  # it here, baking in this machine's checkout path (a macOS path under
+  # /opt/homebrew) that does not exist on the GPU host, and every mount fails.
+  buildkite-agent pipeline upload --no-interpolation "$OUT"
 else
   echo "buildkite-agent not on PATH; generated pipeline follows"
   cat "$OUT"

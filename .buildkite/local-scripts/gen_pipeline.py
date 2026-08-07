@@ -557,9 +557,13 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
         "image": config.get("image"),
         "always-pull": bool(docker.get("always_pull", False)),
         "propagate-environment": True,
-        # Never share the host PID namespace: several upstream PD scripts run an
-        # unfiltered `pkill -9 -f "vllm serve"`.
-        "pid": "private",
+        # No `pid` key on purpose. Docker's default is already a private PID
+        # namespace (verified: a container sees 4 processes and is PID 1), which
+        # is the isolation the upstream PD scripts need for their unfiltered
+        # `pkill -9 -f "vllm serve"`. Asking for it explicitly is worse than
+        # useless: the plugin passes the value straight through, and
+        # `--pid private` is not valid docker syntax, so every job exits 125
+        # with "invalid PID mode" before the container starts.
         # vLLM's multiprocessing needs more shared memory than docker's 64MB.
         "shm-size": docker.get("shm_size", "8gb"),
         # The serving images set ENTRYPOINT to `vllm serve`, which swallows the
@@ -567,6 +571,20 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
         # runs. Override it so the commands reach a shell.
         "entrypoint": docker.get("entrypoint", "bash"),
     }
+    # The plugin mounts the checkout over `workdir` by default. That puts the
+    # checkout's own vllm/ source tree on sys.path, where it shadows the
+    # compiled package in the image, and kernel tests fail with
+    # "_OpNamespace '_C' object has no attribute gelu_fast". Configs that mount
+    # only tests/ themselves must turn it off.
+    if "mount_checkout" in docker:
+        plugin["mount-checkout"] = bool(docker["mount_checkout"])
+    # Volumes may reference agent variables such as $BUILDKITE_BUILD_CHECKOUT_PATH,
+    # which must resolve on the test agent, so the upload runs with
+    # --no-interpolation. The plugin only expands variables inside volume paths
+    # when this is on (it defaults to off), and without it docker receives the
+    # literal string "$BUILDKITE_BUILD_CHECKOUT_PATH/tests" as a host path.
+    if docker.get("expand_volume_vars", True):
+        plugin["expand-volume-vars"] = True
     if docker.get("volumes"):
         plugin["volumes"] = list(docker["volumes"])
     if step.working_dir:
