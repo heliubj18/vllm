@@ -650,6 +650,13 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
         emitted["timeout_in_minutes"] = timeout
     if env:
         emitted["env"] = env
+    # Give up the whole run once anything has failed. GPU steps here are
+    # serialized on one box, so a queued step behind a failure is holding the
+    # only GPU slot for a verdict nobody is waiting on - Sequence Parallel alone
+    # takes 41 minutes. Cheap to re-run after a fix, expensive to sit through.
+    # Set fail_fast: false to collect every failure in one pass instead.
+    if config.get("fail_fast", True):
+        emitted["cancel_on_build_failing"] = True
 
     # Serialize access to the GPUs. Buildkite runs steps in parallel by default,
     # and upstream can allow that because it routes each step shape to its own

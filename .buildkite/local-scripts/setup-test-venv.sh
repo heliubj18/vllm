@@ -13,9 +13,13 @@
 # "bad interpreter: /test-venv/bin/python3: No such file or directory".
 #
 #   docker run --rm --entrypoint bash \
-#     -v /root/chengfeng-test/test-venv:/test-venv \
+#     -v /models/chengfeng-ci/test-venv:/test-venv \
 #     -v "$PWD/.buildkite:/bk:ro" \
 #     vllm/vllm-openai:nightly /bk/local-scripts/setup-test-venv.sh
+#
+# The host path is on /models because the root filesystem is at 95%. Only the
+# in-container path matters to the venv itself: pyvenv.cfg and every shebang
+# record /test-venv, so relocating the host side is a plain mv.
 #
 # Idempotent: re-running upgrades in place. Safe to re-run after the image
 # changes, which is the point - without this script the venv's contents are
@@ -57,6 +61,16 @@ echo "--- Installing test dependencies"
   'ray[cgraph,default]>=2.48.0' \
   'multiprocess==0.70.16' \
   'lm-eval[api]>=0.4.12'
+
+# ray[cgraph] pulls cupy-cuda12x, but the image is CUDA 13 and ships
+# cupy-cuda13x. Both end up importable and the venv's copy wins through
+# PYTHONPATH, so cupy loads a CUDA 12 build against a CUDA 13 runtime. cupy
+# itself warns about it ("multiple CuPy packages are installed") and keeps
+# going. Drop the wrong one and let the image's own build show through.
+if "$VENV/bin/python" -m pip show cupy-cuda12x >/dev/null 2>&1; then
+  echo "--- Removing cupy-cuda12x (conflicts with the image's cupy-cuda13x)"
+  "$VENV/bin/python" -m pip uninstall --quiet --yes cupy-cuda12x
+fi
 
 echo "--- Verifying"
 "$VENV/bin/python" - <<'PY'

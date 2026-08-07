@@ -152,11 +152,33 @@ run_all_exclude_patterns:
   - cmake/hipify.py
   - cmake/cpu_extension.cmake
 
+# Abandon the run as soon as any step fails, rather than working through the
+# queue for a result that is already red.
+#
+# This matters more here than upstream. Every GPU step contends for one box with
+# gpu_slots: 1, so steps behind a failure are queued for a single slot and the
+# tail is long - Sequence Parallel alone is 41 minutes. Re-running after a fix
+# costs less than sitting through a run whose verdict is settled.
+#
+# Set false when you want a full inventory of what is broken in one pass, which
+# is the better trade while bringing new steps online.
+fail_fast: true
+
 # Injected into every generated test step.
 env:
   # https://github.com/NVIDIA/nccl/issues/1838
   NCCL_CUMEM_HOST_ENABLE: "0"
-  VLLM_WORKER_MULTIPROC_METHOD: spawn
+
+  # Upstream sets this only for the steps that need it (ROCm-specific models,
+  # Whisper deadlocks - see test-amd.yaml), never pipeline-wide, so we follow
+  # suit and leave it to the step's own commands, which reach the container
+  # unmodified. Forcing spawn globally is not the safe default it looks like:
+  # tests/basic_correctness/test_basic_correctness.py:244 documents ordering
+  # written against fork semantics.
+  #
+  # Removing it does NOT fix Model Runner V2 Distributed, which fails with
+  # "Cannot re-initialize CUDA in forked subprocess" either way - that one's
+  # root cause is a WorkerProc background exception, still unidentified.
 
   # Where the model mount lands. Kept on /models (a separate 3.5T NVMe with
   # 1.5T free) because the root filesystem only has ~56G. Models are downloaded
@@ -187,6 +209,11 @@ env:
   # vllm still come from the image. The image's torch (2.13.0+cu130) already
   # matches what requirements/test/cuda.in pins, so nothing overwrites it.
   PYTHONPATH: /test-venv/lib/python3.12/site-packages
+
+  # Point vLLM's cache root at the persistent mount above, so torch.compile
+  # results survive the container. Defaults to ~/.cache/vllm, which is inside
+  # the image.
+  VLLM_CACHE_ROOT: /vllm-cache
 
 # Serializing execution on the test agent.
 #
@@ -272,8 +299,31 @@ docker:
     - "$BUILDKITE_BUILD_CHECKOUT_PATH/tests:/vllm-workspace/tests:ro"
     - "$BUILDKITE_BUILD_CHECKOUT_PATH/.buildkite:/vllm-workspace/.buildkite:ro"
     - "$BUILDKITE_BUILD_CHECKOUT_PATH/pyproject.toml:/vllm-workspace/pyproject.toml:ro"
-    - "/root/chengfeng-test/test-venv:/test-venv"
+    # 1.1G of pytest plugins and test-only libraries, built by
+    # local-scripts/setup-test-venv.sh. On /models rather than the root
+    # filesystem, which sits at 95% with 50G left. The venv records only the
+    # in-container path (/test-venv) in pyvenv.cfg and its shebangs, so the host
+    # side can be moved with a plain mv - nothing inside it needs rebuilding.
+    #
+    # Kept in chengfeng-ci/, a sibling of the model directory rather than a
+    # child: HF_HOME points at chengfeng-test, so anything under it shows up
+    # alongside hub/ as if it were cache content.
+    - "/models/chengfeng-ci/test-venv:/test-venv"
     - "/models/chengfeng-test:/models/chengfeng-test"
+    # torch.compile output, keyed by VLLM_CACHE_ROOT below. Without this the
+    # cache lands inside the container and dies with it on --rm, so every step
+    # recompiles graphs a previous step already built. Build #15's Sequence
+    # Parallel step spent 34.75s on the first torch.compile and 9-12s on each
+    # subsequent engine init, across 45 cases - all of it repeated on the next
+    # run. Read-write, and shared between steps on purpose: the cache is keyed
+    # by graph and config, so hits across steps are exactly what we want.
+    #
+    # On /models rather than the root filesystem: this grows without bound as
+    # graph shapes accumulate, and the root filesystem is at 95% with 50G left.
+    # Safe to delete wholesale when it gets large - it only costs recompilation,
+    # which is the opposite of the model cache next door, where a delete means
+    # re-downloading tens of GB.
+    - "/models/chengfeng-ci/vllm-cache:/vllm-cache"
     # The host already had a populated HF cache before this pipeline existed,
     # holding several repos the tests want - including meta-llama/Llama-3.1-8B-Instruct
     # (15G on disk) and Llama-3.2-1B-Instruct. Those are symlinked into the
