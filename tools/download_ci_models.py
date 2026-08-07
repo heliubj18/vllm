@@ -59,6 +59,22 @@ MODEL_PATTERNS = (
         r"(?:^|[\s,])model:\s*([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*)",
         re.MULTILINE,
     ),
+    # The pattern above requires the value on the same line as the keyword, so
+    # it misses the kwarg spilling onto the next line - common once a call is
+    # wrapped to fit the line limit:
+    #
+    #     TEXT_ENGINE_ARGS = AsyncEngineArgs(
+    #         model="meta-llama/Llama-3.2-1B-Instruct",
+    #
+    # 45 repositories in tests/ are only referenced this way, mostly LoRA
+    # adapters and small quantized checkpoints. Requiring the org/name shape
+    # here (rather than accepting anything quoted, as the same-line pattern
+    # does) keeps the laxer newline match from picking up local paths.
+    re.compile(
+        r"(?:model|model_id|model_name|model_path|MODEL_NAME|MODEL_PATH"
+        r"|tokenizer|repo_id)\s*[:=]\s*\n?\s*"
+        r"[\"']([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*)[\"']"
+    ),
 )
 
 
