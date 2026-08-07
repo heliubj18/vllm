@@ -70,10 +70,11 @@ filter:
   # does not spend 41 minutes re-proving Sequence Parallel, which already passed
   # in build #15. Reset to [] once these are green.
   #
-  # engine-1-gpu is deliberately absent: it needs meta-llama/Llama-3.2-1B as
-  # TOKENIZER_NAME (tests/v1/engine/utils.py:24) and that repo is gated 403
-  # until access is approved on the Hub, so running it now only re-proves a
-  # known blocker.
+  # engine-1-gpu needs meta-llama/Llama-3.2-1B as TOKENIZER_NAME
+  # (tests/v1/engine/utils.py:24). That repo is gated on the Hub and this
+  # account has no grant for it, so hf-mirror returns 403 for every file. It is
+  # staged from ModelScope (LLM-Research/Llama-3.2-1B) instead, hardlinked into
+  # the HF cache layout the tests expect - see local-scripts/stage_from_modelscope.py.
   step_allowlist:
     - kernels-attention-test        # $$ escaping, exit 4 at 0m4s
     - kernels-moe-test              # same
@@ -81,6 +82,7 @@ filter:
     - v1-others-cpu                 # GPU-less container, 194 failed
     - basic-models-test-other-cpu   # same, ModuleNotFoundError: vllm._C
     - model-runner-v2-distributed-2-gpus  # cupy shadowing; root cause still open
+    - engine-1-gpu                  # was blocked on gated Llama-3.2-1B, now staged
 
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
@@ -259,6 +261,24 @@ concurrency:
   # keep different hardware from blocking each other.
   group_prefix: vllm-ci
 
+  # Hard ceiling on test containers running on this box at once, across every
+  # build. This is what keeps several open PRs from multiplying containers:
+  # concurrency groups are organization-wide, so two builds' steps queue against
+  # each other rather than each getting its own slot.
+  #
+  # Set because gpu_slots and cpu_slots alone do not bound the total. Buildkite
+  # offers no mutual exclusion between groups, so gpu_slots: 1 with cpu_slots: 2
+  # permits three containers at once - and every container is handed the same
+  # '"device=0,1"', so all three would contend for the same 2x24GB.
+  #
+  # 1 means fully serial. Raise it only with the VRAM to back it: each step asks
+  # for all the devices in docker.gpus, not a slice, so N concurrent steps need
+  # roughly N times the VRAM. Two 1-GPU steps could share this box, but the
+  # generator cannot tell Buildkite "this step weighs 2 slots", so the safe knob
+  # is this single number. Comment it out to fall back to the per-kind split
+  # below.
+  container_slots: 1
+
   # GPU steps that may run at once. Keep at 1 unless the box has enough VRAM for
   # two concurrent steps - a step asks for all GPUs, not a slice.
   gpu_slots: 1
@@ -293,6 +313,35 @@ docker:
   # hardware.gpu_count above.
   gpus: '"device=0,1"'
 
+  # Copy these out of the read-only checkout mounts into the container before
+  # the step's own commands run, instead of letting the tests execute straight
+  # off the mount.
+  #
+  # The agent's working directory is per *agent instance*, not per build:
+  # /opt/buildkite/builds/<agent-name>/<org>/<pipeline>, with no build number in
+  # the path. So every build this agent handles reuses one checkout, and each job
+  # begins with `git clean -ffxdq` plus a checkout of its own build's commit.
+  #
+  # The mounts are live, not snapshots - verified by inode (host and container
+  # both saw 27965847 for tests/conftest.py) and by creating a file host-side
+  # that appeared in the running container immediately. So when a job from
+  # another PR starts, a step still running sees its tests/ replaced underneath
+  # it, mid-run. Nothing errors; the step simply finishes against the wrong
+  # source and reports under its own commit. That failure mode is silent and
+  # reads as flakiness.
+  #
+  # Copying is cheap enough not to trade off: tests/ is 22M across 1833 files
+  # and copies in 0.25s, against steps that run 40-100 minutes. (The 361M
+  # checkout is mostly .git, 247M, which is never mounted.)
+  #
+  # Serialization does not remove the need for this. gpu_slots: 1 keeps GPU
+  # steps from overlapping, but cpu_slots: 2 already allows two CPU steps at
+  # once, and a CPU step from one build can overlap a GPU step from another.
+  copy_from_checkout:
+    - tests
+    - .buildkite
+    - pyproject.toml
+
   # Host mounts, all on the *test* agent. Two groups:
   #
   # 1. The test code. The vllm/vllm-openai images are slim serving images and
@@ -314,9 +363,15 @@ docker:
   # (/opt/buildkite/builds), which is what makes these mounts resolve correctly
   # under docker-outside-of-docker.
   volumes:
-    - "$BUILDKITE_BUILD_CHECKOUT_PATH/tests:/vllm-workspace/tests:ro"
-    - "$BUILDKITE_BUILD_CHECKOUT_PATH/.buildkite:/vllm-workspace/.buildkite:ro"
-    - "$BUILDKITE_BUILD_CHECKOUT_PATH/pyproject.toml:/vllm-workspace/pyproject.toml:ro"
+    # Mounted at a staging path, NOT directly at /vllm-workspace. Each step
+    # copies them into place before running - see docker.copy_from_checkout and
+    # the long comment on _copy_commands() in gen_pipeline.py. Mounting them
+    # where the tests run would expose every step to another build's checkout
+    # switch, because the agent reuses one working directory per agent instance
+    # for every build it handles.
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/tests:/checkout-ro/tests:ro"
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/.buildkite:/checkout-ro/.buildkite:ro"
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/pyproject.toml:/checkout-ro/pyproject.toml:ro"
     # 1.1G of pytest plugins and test-only libraries, built by
     # local-scripts/setup-test-venv.sh. On /models rather than the root
     # filesystem, which sits at 95% with 50G left. The venv records only the

@@ -479,6 +479,45 @@ def _junit_path(step: Step, report: dict[str, Any]) -> str:
     return f"{junit_dir}/{step.slug}.xml"
 
 
+CHECKOUT_STAGING = "/checkout-ro"
+
+
+def _copy_commands(config: dict[str, Any]) -> list[str]:
+    """Copy the checkout mounts into the workspace before any test runs.
+
+    The agent keeps one working directory per agent instance - the path is
+    <build-path>/<agent-name>/<org>/<pipeline> with no build number - so every
+    build it handles reuses the same checkout, and each job starts by cleaning it
+    and checking out its own build's commit. The volume mounts are live views of
+    that directory, not snapshots, so a step running while another build's job
+    starts sees its own tests/ swapped underneath it. Nothing fails loudly; the
+    step just runs against another PR's source and reports under its own commit.
+
+    Copying decouples the two. It costs 0.25s for 22M of tests/, against steps
+    that run for tens of minutes.
+
+    Directories are copied with a trailing `/.` so the contents land in an
+    existing destination rather than nesting (cp -r src dst puts src *inside* dst
+    when dst exists, which would give /vllm-workspace/tests/tests).
+    """
+    docker = config.get("docker") or {}
+    names = docker.get("copy_from_checkout")
+    if not names:
+        return []
+
+    out = ["mkdir -p /vllm-workspace"]
+    for name in names:
+        src = f"{CHECKOUT_STAGING}/{name}"
+        dst = f"/vllm-workspace/{name}"
+        # A file (pyproject.toml) and a directory need different forms, and the
+        # step cannot know which it is at generation time - decide in the shell.
+        out.append(
+            f'if [ -d "{src}" ]; then mkdir -p "{dst}" && cp -a "{src}/." "{dst}/"; '
+            f'else cp -a "{src}" "{dst}"; fi'
+        )
+    return out
+
+
 def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     """Add JUnit reporting and the skip-ratio guard around upstream commands.
 
@@ -486,10 +525,13 @@ def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     PYTEST_ADDOPTS so the report lands in a known place without touching any
     command string.
     """
+    prologue = _copy_commands(config)
+
     # Steps that never call pytest (static audits, cargo, shell checks) get no
-    # report, so wrapping them would only add a spurious skip-ratio check.
+    # report, so wrapping them would only add a spurious skip-ratio check. They
+    # still need the copy: their commands read from the checkout too.
     if not _runs_pytest(step):
-        return list(step.commands)
+        return prologue + list(step.commands)
 
     report = config.get("report") or {}
     junit_dir = report.get("junit_dir") or "/vllm-workspace/test-reports"
@@ -499,7 +541,7 @@ def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
         "checker_path", "/vllm-workspace/.buildkite/local-scripts/check_skip_ratio.py"
     )
 
-    out = [f"mkdir -p {junit_dir}"]
+    out = [*prologue, f"mkdir -p {junit_dir}"]
     # We drop upstream's `parallelism`, so Buildkite never sets the two shard
     # variables. Commands that pass them to pytest would expand to an empty
     # `--shard-id= --num-shards=` and fail at collection, so define them as the
@@ -557,6 +599,20 @@ def _concurrency(step: Step, config: dict[str, Any]) -> tuple[str | None, int]:
     hardware = config.get("hardware") or {}
     queue = hardware.get("queue_gpu") or "default"
     prefix = rules.get("group_prefix") or "vllm-ci"
+
+    # A single ceiling over every test container on the box, GPU or not.
+    # container_slots is not the same knob as gpu_slots: Buildkite has no
+    # mutual exclusion *between* groups, so gpu_slots and cpu_slots each cap
+    # their own group and nothing caps the total - gpu_slots: 1 with
+    # cpu_slots: 2 permits three containers at once. Every container asks for
+    # the same pinned devices, so three of them contend for the same VRAM.
+    #
+    # When set, all steps share one group and this is the real limit; the
+    # per-kind values below are then unreachable and left alone rather than
+    # removed, so raising the ceiling restores the split behaviour.
+    total = rules.get("container_slots")
+    if total is not None:
+        return f"{prefix}/{queue}/all", int(total)
 
     if _is_cpu_only(step):
         limit = int(rules.get("cpu_slots") or 2)
