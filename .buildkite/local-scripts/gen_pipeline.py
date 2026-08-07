@@ -509,7 +509,7 @@ def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     # PYTEST_ADDOPTS applies to every pytest process the step spawns, including
     # the ones launched from upstream's shell wrappers.
     out.append(f'export PYTEST_ADDOPTS="--junitxml={junit} -o junit_family=xunit2"')
-    out.extend(step.commands)
+    out.extend(_unescape_dollars(c) for c in step.commands)
 
     enforce = bool(report.get("skip_ratio_enforce", False))
     threshold = report.get("skip_ratio_default", 0.9)
@@ -519,6 +519,26 @@ def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     # `|| true` keeps a warn-only guard from masking the real exit status.
     out.append(guard if enforce else f"{guard} || true")
     return out
+
+
+def _unescape_dollars(command: str) -> str:
+    """Undo the `$$` escaping upstream commands rely on the uploader to resolve.
+
+    Upstream writes `--shard-id=$$BUILDKITE_PARALLEL_JOB`, counting on
+    `buildkite-agent pipeline upload` to collapse `$$` to a single `$` during
+    interpolation. We upload with --no-interpolation - required so
+    $BUILDKITE_BUILD_CHECKOUT_PATH resolves on the test agent rather than the
+    mac that generates the pipeline - which means nothing performs that
+    collapse. bash then reads `$$` as its own PID and the rest as literal text:
+
+        pytest: error: argument --shard-id:
+                invalid positive_int value: '7BUILDKITE_PARALLEL_JOB'
+
+    So do the collapse here, where the two requirements meet. This is the one
+    place a command string is rewritten; it restores upstream's intent rather
+    than changing it.
+    """
+    return command.replace("$$", "$")
 
 
 def _concurrency(step: Step, config: dict[str, Any]) -> tuple[str | None, int]:
