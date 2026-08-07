@@ -66,7 +66,21 @@ filter:
   timeout_multiplier: 2.0
 
   # When non-empty, only these step keys are considered (debugging aid).
-  step_allowlist: []
+  # TEMPORARY: narrowed to the steps whose fixes are being verified, so a run
+  # does not spend 41 minutes re-proving Sequence Parallel, which already passed
+  # in build #15. Reset to [] once these are green.
+  #
+  # engine-1-gpu is deliberately absent: it needs meta-llama/Llama-3.2-1B as
+  # TOKENIZER_NAME (tests/v1/engine/utils.py:24) and that repo is gated 403
+  # until access is approved on the Hub, so running it now only re-proves a
+  # known blocker.
+  step_allowlist:
+    - kernels-attention-test        # $$ escaping, exit 4 at 0m4s
+    - kernels-moe-test              # same
+    - kernels-quantization-test     # same
+    - v1-others-cpu                 # GPU-less container, 194 failed
+    - basic-models-test-other-cpu   # same, ModuleNotFoundError: vllm._C
+    - model-runner-v2-distributed-2-gpus  # cupy shadowing; root cause still open
 
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
@@ -162,7 +176,11 @@ run_all_exclude_patterns:
 #
 # Set false when you want a full inventory of what is broken in one pass, which
 # is the better trade while bringing new steps online.
-fail_fast: true
+# TEMPORARY: off while step_allowlist above narrows the run to six steps being
+# verified at once. Fail-fast would cancel the rest on the first failure and
+# hide whether the other fixes landed, which is the whole point of this run.
+# Turn back on together with resetting step_allowlist to [].
+fail_fast: false
 
 # Injected into every generated test step.
 env:
