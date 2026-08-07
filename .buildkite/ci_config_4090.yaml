@@ -235,6 +235,34 @@ env:
   # the image.
   VLLM_CACHE_ROOT: /vllm-cache
 
+# Dispatch order inside the concurrency queue. Higher runs first.
+#
+# Matters only when more than one PR is open. gpu_slots is 1, so every build's
+# GPU steps share one organization-wide queue, and Buildkite drains it in
+# dispatch order - one PR's 100-minute kernel sweep can sit ahead of another PR's
+# 4-minute step, making the second PR wait the full 100 minutes for a verdict it
+# could have had at once.
+#
+# This only reorders what is already queued. It does not change which steps run,
+# how many run at once, or the total time to drain the queue.
+priority:
+  enabled: true
+
+  # Cheap steps first. Note this is NOT ordered by importance: cost.must_run is
+  # deliberately left at the default priority even though it is the coverage that
+  # matters most. Those three kernel steps carry 100-130 minute timeouts and
+  # Kernels Attention measured 100 minutes here, so fronting them would make a
+  # second PR wait ~5 hours before its own steps dispatch at all. must_run
+  # guarantees a step runs, not that it runs early.
+  #
+  # Upstream's timeout is a bad absolute cost model - it is sized for cold model
+  # downloads on upstream's network, which pre-staged weights remove, which is why
+  # cost tiers exist at all. For ordering it is good enough: monotonic with the
+  # work, and a wrong guess only changes queue order. Replace with measured
+  # durations once the JUnit reports have been collected across a full run.
+  short: 5
+  short_max_minutes: 15
+
 # Serializing execution on the test agent.
 #
 # Buildkite dispatches steps in parallel by default. Upstream can allow that
@@ -261,30 +289,34 @@ concurrency:
   # keep different hardware from blocking each other.
   group_prefix: vllm-ci
 
-  # Hard ceiling on test containers running on this box at once, across every
-  # build. This is what keeps several open PRs from multiplying containers:
-  # concurrency groups are organization-wide, so two builds' steps queue against
-  # each other rather than each getting its own slot.
-  #
-  # Set because gpu_slots and cpu_slots alone do not bound the total. Buildkite
-  # offers no mutual exclusion between groups, so gpu_slots: 1 with cpu_slots: 2
-  # permits three containers at once - and every container is handed the same
-  # '"device=0,1"', so all three would contend for the same 2x24GB.
-  #
-  # 1 means fully serial. Raise it only with the VRAM to back it: each step asks
-  # for all the devices in docker.gpus, not a slice, so N concurrent steps need
-  # roughly N times the VRAM. Two 1-GPU steps could share this box, but the
-  # generator cannot tell Buildkite "this step weighs 2 slots", so the safe knob
-  # is this single number. Comment it out to fall back to the per-kind split
-  # below.
-  container_slots: 1
+  # The two limits below bound different resources and are deliberately not a
+  # single total. Buildkite has no mutual exclusion between concurrency groups,
+  # so they add up: gpu_slots 1 + cpu_slots 2 permits three containers at once.
+  # That is intended - only one of them is competing for VRAM.
 
-  # GPU steps that may run at once. Keep at 1 unless the box has enough VRAM for
-  # two concurrent steps - a step asks for all GPUs, not a slice.
+  # GPU steps that may run at once, across every build. This single number is
+  # what keeps several open PRs from stacking GPU work on one box: the group is
+  # organization-wide, so PR A's kernel step and PR B's kernel step queue against
+  # each other instead of each getting a slot.
+  #
+  # Keep at 1 unless the box has the VRAM to back more. A step is handed every
+  # device in docker.gpus, not a slice, so two concurrent steps need roughly
+  # twice the VRAM. Two 1-GPU steps would fit these two cards, but Buildkite
+  # counts jobs rather than weights, so it cannot be told "this step needs both
+  # devices" - raising this would let two 2-GPU steps collide. Real parallelism
+  # also needs BUILDKITE_AGENT_SPAWN > 1 on the agent, which is 1 today, so
+  # raising this alone changes nothing.
   gpu_slots: 1
 
-  # CPU-only steps do not touch VRAM so they can overlap with GPU work, but they
-  # still share host RAM and cores.
+  # CPU-only steps run concurrently with each other and with GPU work. They are
+  # handed the devices (importing vllm needs libcuda.so.1) but allocate no VRAM -
+  # measured at 1 MiB while running - so they are bounded by host RAM and cores
+  # rather than by the cards.
+  #
+  # Note these are upstream's CPU markings, meaning "performs no GPU compute".
+  # Running them in a truly GPU-less container is not an option here: it was
+  # tested, and all three sample tests fail at import. That needs a CPU-built
+  # image, which needs the image build step that does not exist yet.
   cpu_slots: 2
 
 # Settings for the docker plugin on the *test* agent. The generating agent never

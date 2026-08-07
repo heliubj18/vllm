@@ -583,14 +583,71 @@ def _unescape_dollars(command: str) -> str:
     return command.replace("$$", "$")
 
 
+def _priority(step: Step, config: dict[str, Any]) -> int:
+    """Dispatch order within the concurrency queue. Higher goes first.
+
+    With gpu_slots at 1 the GPU steps form a single queue shared by every open
+    PR, and Buildkite drains it in dispatch order. So one PR's 100-minute kernel
+    sweep can sit ahead of another PR's 4-minute step, and the second PR waits
+    the full 100 minutes for a verdict it could have had immediately. Priority is
+    Buildkite's own answer to this: it reorders what is already queued, without
+    changing what runs or how much of it.
+
+    Ordering is by cost, cheapest first, and deliberately NOT by importance.
+
+    The tempting rule - put cost.must_run at the front because it is the coverage
+    that must not regress - makes things worse here. Those three kernel steps
+    carry upstream timeouts of 100, 120 and 130 minutes, and Kernels Attention
+    was measured at 100 minutes on this box. Draining them first means a second
+    PR waits some five hours before its own steps are even dispatched. must_run
+    guarantees a step *runs*; it says nothing about it running early.
+
+    So the tiers are:
+
+      short      upstream timeout at or under short_max_minutes. A cheap step
+                 cannot delay the queue much, and finishing it early gives
+                 whoever is waiting a real verdict instead of a spinner.
+      default    everything else, in the order Buildkite already had.
+
+    Upstream's timeout_in_minutes is a poor absolute cost model - it is sized for
+    cold model downloads on upstream's network, which pre-staged weights remove,
+    which is why cost tiers exist at all. For *ordering* it is good enough: it is
+    monotonic with the work, and a wrong guess only changes queue order. Once
+    real per-step durations are collected from the JUnit reports, they should
+    replace it here.
+    """
+    rules = config.get("priority") or {}
+    if not rules.get("enabled", True):
+        return 0
+
+    short_max = rules.get("short_max_minutes")
+    timeout = step.timeout_in_minutes
+    if short_max and timeout and timeout <= int(short_max):
+        return int(rules.get("short") or 5)
+
+    return 0
+
+
 def _concurrency(step: Step, config: dict[str, Any]) -> tuple[str | None, int]:
     """Return (concurrency_group, limit) for a step, or (None, 0) to leave it free.
 
-    GPU steps share one group so only `gpu_slots` run at a time. CPU-only steps
-    get their own group: they are handed the devices too (see emit_step - the
-    import needs one visible) but do not allocate VRAM, measured at 1 MiB while
-    running, so they can overlap GPU work. They still consume host RAM and CPU
-    on the same box, which is what cpu_slots bounds.
+    Two groups, split by what the step actually contends for.
+
+    VRAM is the scarce resource and only GPU steps consume it, so those share one
+    group capped at `gpu_slots` - across builds, since concurrency groups are
+    organization-wide. That is what keeps several open PRs from stacking GPU work
+    on one box.
+
+    CPU-only steps get their own group. They are handed the devices too (see
+    emit_step: importing vllm needs libcuda.so.1, so a GPU-less container fails
+    at import) but allocate no VRAM, measured at 1 MiB while running. So they can
+    overlap GPU work, and each other, bounded by `cpu_slots` for host RAM and
+    cores rather than memory on the card.
+
+    Buildkite offers no mutual exclusion *between* groups, so the two limits add
+    up rather than capping a total: gpu_slots 1 + cpu_slots 2 permits three
+    containers. That is deliberate here - the third and fourth containers are not
+    competing for the thing that runs out.
     """
     rules = config.get("concurrency") or {}
     if not rules.get("enabled", True):
@@ -599,20 +656,6 @@ def _concurrency(step: Step, config: dict[str, Any]) -> tuple[str | None, int]:
     hardware = config.get("hardware") or {}
     queue = hardware.get("queue_gpu") or "default"
     prefix = rules.get("group_prefix") or "vllm-ci"
-
-    # A single ceiling over every test container on the box, GPU or not.
-    # container_slots is not the same knob as gpu_slots: Buildkite has no
-    # mutual exclusion *between* groups, so gpu_slots and cpu_slots each cap
-    # their own group and nothing caps the total - gpu_slots: 1 with
-    # cpu_slots: 2 permits three containers at once. Every container asks for
-    # the same pinned devices, so three of them contend for the same VRAM.
-    #
-    # When set, all steps share one group and this is the real limit; the
-    # per-kind values below are then unreachable and left alone rather than
-    # removed, so raising the ceiling restores the split behaviour.
-    total = rules.get("container_slots")
-    if total is not None:
-        return f"{prefix}/{queue}/all", int(total)
 
     if _is_cpu_only(step):
         limit = int(rules.get("cpu_slots") or 2)
@@ -712,6 +755,9 @@ def emit_step(step: Step, mode: str, config: dict[str, Any]) -> dict[str, Any]:
         "plugins": [{"docker#v5.2.0": plugin}],
         "commands": _wrap_commands(step, config),
     }
+    priority = _priority(step, config)
+    if priority:
+        emitted["priority"] = priority
     if _runs_pytest(step):
         emitted["artifact_paths"] = report.get("artifact_paths")
     if timeout:
