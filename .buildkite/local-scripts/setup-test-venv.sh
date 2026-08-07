@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Build the persistent test-dependency venv on the GPU test host.
+#
+# The vllm/vllm-openai images are slim serving images: they ship pytest but none
+# of the plugins upstream's commands rely on, and none of the libraries the tests
+# import. Rather than build a custom image (the docker filesystem on that host
+# has no room), the extras live in a venv on the host that every test container
+# mounts at /test-venv and picks up through PYTHONPATH.
+#
+# Run this inside the test image, not on the host: the venv is created with the
+# in-container path so its scripts' shebangs point at /test-venv/bin/python.
+# Running it from the host produces a venv whose `pip` dies with
+# "bad interpreter: /test-venv/bin/python3: No such file or directory".
+#
+#   docker run --rm --entrypoint bash \
+#     -v /root/chengfeng-test/test-venv:/test-venv \
+#     -v "$PWD/.buildkite:/bk:ro" \
+#     vllm/vllm-openai:nightly /bk/local-scripts/setup-test-venv.sh
+#
+# Idempotent: re-running upgrades in place. Safe to re-run after the image
+# changes, which is the point - without this script the venv's contents are
+# whatever someone installed by hand, and a rebuild silently loses them.
+#
+# This is NOT part of vLLM upstream CI.
+set -euo pipefail
+
+VENV="${TEST_VENV:-/test-venv}"
+# The host cannot reach pypi.org reliably; see the HF_ENDPOINT note in
+# ci_config_4090.yaml for the same problem with huggingface.co.
+INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+  echo "--- Creating venv at $VENV"
+  # --system-site-packages so torch and the compiled vllm still come from the
+  # image. The image's torch already matches what requirements/test/cuda.in
+  # pins, so nothing below overwrites it.
+  python3 -m venv --system-site-packages "$VENV"
+fi
+
+echo "--- Installing test dependencies"
+# Two groups, both discovered by running the generated pipeline and reading what
+# the failures asked for:
+#
+#   pytest plugins   upstream's commands pass --shard-id, --timeout and --forked,
+#                    and tblib is needed to pickle exceptions across processes.
+#   test imports     libraries the test modules import directly. ray also backs
+#                    the distributed executor tests; multiprocess is only pinned
+#                    in requirements/test/rocm.in but tests/distributed imports
+#                    it on every platform.
+"$VENV/bin/python" -m pip install --quiet --no-cache-dir --index-url "$INDEX" \
+  pytest-asyncio \
+  pytest-shard \
+  pytest-timeout \
+  pytest-forked \
+  pytest-rerunfailures \
+  tblib \
+  'ray[cgraph,default]>=2.48.0' \
+  'multiprocess==0.70.16' \
+  'lm-eval[api]>=0.4.12'
+
+echo "--- Verifying"
+"$VENV/bin/python" - <<'PY'
+import importlib
+
+for mod in ("pytest_asyncio", "pytest_shard", "pytest_timeout", "pytest_forked",
+            "tblib", "ray", "multiprocess", "lm_eval"):
+    try:
+        importlib.import_module(mod)
+        print(f"  ok    {mod}")
+    except ImportError as exc:
+        raise SystemExit(f"  MISSING {mod}: {exc}")
+PY
+
+echo "--- Done. Size: $(du -sh "$VENV" | cut -f1)"
