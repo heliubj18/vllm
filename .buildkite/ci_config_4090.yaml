@@ -404,6 +404,22 @@ docker:
   gpus_by_devices:
     1: '"device=0"'
 
+  # Override the device count for steps whose upstream marking describes their
+  # image rather than their cases. Indexes into gpus_by_devices above, falling
+  # through to `gpus` when no entry matches.
+  #
+  # v1-others-cpu: 401 of its 402 cases need no device at all, but
+  # test_scheduler.py::test_async_scheduling_pp_allows_rescheduling_with_output_placeholders
+  # builds a ParallelConfig with pipeline_parallel_size=2. It never touches a
+  # second card - measured 0.0 GiB allocated across the whole step - but on a CUDA
+  # image ParallelConfig checks the visible GPU count and rejects world size 2.
+  # Upstream does not hit this because the step runs on image-build-cpu, where that
+  # check is inert. Two cards costs nothing here since the step allocates no VRAM,
+  # and the alternative is one guaranteed failure per run, which under fail_fast
+  # cancels every GPU step queued behind it.
+  devices_by_step:
+    v1-others-cpu: 2
+
   # Copy these out of the read-only checkout mounts into the container before
   # the step's own commands run, instead of letting the tests execute straight
   # off the mount.

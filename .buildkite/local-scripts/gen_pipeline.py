@@ -612,6 +612,13 @@ def _gpus_for(step: Step, config: dict[str, Any]) -> str:
     # links libcuda.so.1), but never more than one, so they take the 1-device
     # allocation rather than the default.
     wanted = 1 if _is_cpu_only(step) else step.num_devices
+    # A step can need more cards than its upstream marking implies, because
+    # upstream's marking encodes which image it runs on rather than what its cases
+    # ask for. v1-others-cpu is the case in point: upstream runs it on a CPU image
+    # where ParallelConfig does not check GPU count, so a scheduler unit test can
+    # declare world size 2 while touching no device. On a CUDA image that check is
+    # live and the case fails.
+    wanted = int((docker.get("devices_by_step") or {}).get(step.key, wanted))
     return by_count.get(wanted, default)
 
 
