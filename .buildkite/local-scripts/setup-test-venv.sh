@@ -50,7 +50,10 @@ echo "--- Installing test dependencies"
 #   test imports     libraries the test modules import directly. ray also backs
 #                    the distributed executor tests; multiprocess is only pinned
 #                    in requirements/test/rocm.in but tests/distributed imports
-#                    it on every platform.
+#                    it on every platform. torch-abi-audit is imported by
+#                    .buildkite/check-torch-abi.py, not by a test module, which is
+#                    why it surfaced late: fail_fast kept cancelling that step
+#                    before it ever ran.
 "$VENV/bin/python" -m pip install --quiet --no-cache-dir --index-url "$INDEX" \
   pytest-asyncio \
   pytest-shard \
@@ -60,7 +63,8 @@ echo "--- Installing test dependencies"
   tblib \
   'ray[cgraph,default]>=2.48.0' \
   'multiprocess==0.70.16' \
-  'lm-eval[api]>=0.4.12'
+  'lm-eval[api]>=0.4.12' \
+  'torch-abi-audit==0.0.1'
 
 # ray[cgraph] pulls cupy-cuda12x, but the image is CUDA 13 and ships
 # cupy-cuda13x. Both end up importable and the venv's copy wins through
@@ -77,7 +81,7 @@ echo "--- Verifying"
 import importlib
 
 for mod in ("pytest_asyncio", "pytest_shard", "pytest_timeout", "pytest_forked",
-            "tblib", "ray", "multiprocess", "lm_eval"):
+            "tblib", "ray", "multiprocess", "lm_eval", "torch_abi_audit"):
     try:
         importlib.import_module(mod)
         print(f"  ok    {mod}")
