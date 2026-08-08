@@ -65,23 +65,19 @@ filter:
   # A 4090 is slower than upstream's H200/H100, so scale the timeouts up.
   timeout_multiplier: 2.0
 
-  # When non-empty, only these step keys are considered (debugging aid).
-  # TEMPORARY: narrowed to the steps whose fixes are being verified, so a run
-  # does not spend 41 minutes re-proving Sequence Parallel, which already passed
-  # in build #15. Reset to [] once these are green.
+  # When non-empty, only these step keys are considered (debugging aid). Keep it
+  # empty in normal operation: an entry that has already passed is queue spent
+  # re-proving it, and #22 lost five and a half hours that way.
   #
-  step_allowlist:
-    # Each entry carries the failure it is here to verify. GPU steps run one at a
-    # time, so an entry that has already passed is 2 hours of queue spent
-    # re-proving it - kernels-attention-test is deliberately absent for that
-    # reason, having passed at 119m25s in #17.
-    # kernels-moe-test and kernels-quantization-test are deliberately absent:
-    # both passed in #21 (223m09s and 110m25s) once the timeout counted
-    # parallelism and the NVFP4 shard was staged. Leaving them in cost #22 five
-    # and a half hours of queue ahead of v1-others-cpu, which is the step this
-    # round is actually verifying.
-    - v1-others-cpu                 # 30 failed on missing repos, now staged
-    - model-runner-v2-distributed-2-gpus  # WorkerProc background exception, open
+  # Every step that was ever narrowed to has now been accounted for:
+  #   kernels-attention-test         passed 119m25s in #17
+  #   kernels-quantization-test      passed 110m25s in #21, NVFP4 shard staged
+  #   kernels-moe-test               passed 223m09s in #21, timeout x parallelism
+  #   sequence-parallel              passed  41m32s in #15
+  #   v1-others-cpu                  402 cases / 1 failure in #23, see below
+  #   engine-1-gpu                   denylisted, upstream fork bug
+  #   model-runner-v2-distributed    denylisted, same fork bug
+  step_allowlist: []
 
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
@@ -124,6 +120,22 @@ filter:
     # submodule_search_locations instead of find_spec, which is what the comment
     # at flashinfer.py:50 already claims to do. Drop this entry once that lands.
     - engine-1-gpu
+    # Same upstream bug, reached through a different import:
+    # test_basic_correctness.py:23 `from ..utils import multi_gpu_test` pulls in
+    # tests/utils.py, so the chain above runs, and then tests/utils.py:1745 forks
+    # - the log carries the matching DeprecationWarning at that exact line. The
+    # child starts a MultiProcExecutor worker, which dies at gpu_worker.py:369 on
+    # the poisoned context.
+    #
+    # Only the first of this step's three commands is affected. The two DP
+    # commands do not import tests/utils and both pass when run by hand
+    # (test_async_llm_dp 14 selected of 18, test_eagle_dp 1 passed in 145s). They
+    # have never run in CI though: the first command always crashes first, and a
+    # Buildkite step is atomic. So keeping this step would not buy that coverage,
+    # only a red build 43 seconds in - which under fail_fast cancels every GPU
+    # step queued behind it. Recovering those two needs command-level filtering,
+    # which the generator does not have.
+    - model-runner-v2-distributed-2-gpus
 
   # Emit a manual (block) step for tests the diff did not select, so they can
   # still be triggered by hand. Set false to omit them entirely.
@@ -197,11 +209,7 @@ run_all_exclude_patterns:
 #
 # Set false when you want a full inventory of what is broken in one pass, which
 # is the better trade while bringing new steps online.
-# TEMPORARY: off while step_allowlist above narrows the run to six steps being
-# verified at once. Fail-fast would cancel the rest on the first failure and
-# hide whether the other fixes landed, which is the whole point of this run.
-# Turn back on together with resetting step_allowlist to [].
-fail_fast: false
+fail_fast: true
 
 # Injected into every generated test step.
 env:
