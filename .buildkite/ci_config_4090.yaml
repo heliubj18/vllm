@@ -75,9 +75,12 @@ filter:
     # time, so an entry that has already passed is 2 hours of queue spent
     # re-proving it - kernels-attention-test is deliberately absent for that
     # reason, having passed at 119m25s in #17.
-    - kernels-moe-test              # timed out at 101m; timeout now x parallelism 5
-    - kernels-quantization-test     # missing Qwen3-30B-A3B-NVFP4 shard, now staged
-    - v1-others-cpu                 # 30 failed, pydantic reports a missing repo
+    # kernels-moe-test and kernels-quantization-test are deliberately absent:
+    # both passed in #21 (223m09s and 110m25s) once the timeout counted
+    # parallelism and the NVFP4 shard was staged. Leaving them in cost #22 five
+    # and a half hours of queue ahead of v1-others-cpu, which is the step this
+    # round is actually verifying.
+    - v1-others-cpu                 # 30 failed on missing repos, now staged
     - model-runner-v2-distributed-2-gpus  # WorkerProc background exception, open
 
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
