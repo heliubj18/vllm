@@ -70,11 +70,6 @@ filter:
   # does not spend 41 minutes re-proving Sequence Parallel, which already passed
   # in build #15. Reset to [] once these are green.
   #
-  # engine-1-gpu needs meta-llama/Llama-3.2-1B as TOKENIZER_NAME
-  # (tests/v1/engine/utils.py:24). That repo is gated on the Hub and this
-  # account has no grant for it, so hf-mirror returns 403 for every file. It is
-  # staged from ModelScope (LLM-Research/Llama-3.2-1B) instead, hardlinked into
-  # the HF cache layout the tests expect - see local-scripts/stage_from_modelscope.py.
   step_allowlist:
     # Each entry carries the failure it is here to verify. GPU steps run one at a
     # time, so an entry that has already passed is 2 hours of queue spent
@@ -82,7 +77,6 @@ filter:
     # reason, having passed at 119m25s in #17.
     - kernels-moe-test              # timed out at 101m; timeout now x parallelism 5
     - kernels-quantization-test     # missing Qwen3-30B-A3B-NVFP4 shard, now staged
-    - engine-1-gpu                  # was blocked on gated Llama-3.2-1B, now staged
     - v1-others-cpu                 # 30 failed, pydantic reports a missing repo
     - model-runner-v2-distributed-2-gpus  # WorkerProc background exception, open
 
@@ -107,6 +101,26 @@ filter:
     # because each step gets a throwaway container with the tests baked in.
     # Revisit if these steps ever matter enough to justify a writable overlay.
     - plugin-tests-2-gpus
+    # 11 of its cases die with "Cannot re-initialize CUDA in forked subprocess".
+    # Not our environment: collecting v1/engine imports tests/utils.py, whose
+    # line 49 `from vllm.model_executor.kernels.linear import ...` reaches
+    # all2all.py:25 -> flashinfer.py:174 `find_spec("flashinfer.comm")`. find_spec
+    # on a submodule has to import the parent package first, and importing
+    # flashinfer builds a CompilationContext at module scope
+    # (flashinfer/jit/env.py:148) that calls get_device_capability - so CUDA is
+    # live in the pytest parent before the fork in tests/utils.py:1746. Verified
+    # on a bare image with no mounts of ours: find_spec("flashinfer") leaves CUDA
+    # uninitialized, find_spec("flashinfer.comm") does not. Unrelated to
+    # container concurrency; a single container with nothing else running fails
+    # the same way.
+    #
+    # Same step, same error, same defence as upstream #47446, fixed by #47539 by
+    # making one module-level import lazy. That closed the qwen_triton_warmup
+    # path; this is a new instance through flashinfer. The fix belongs upstream
+    # in has_flashinfer_comm() - probe the submodule via the parent spec's
+    # submodule_search_locations instead of find_spec, which is what the comment
+    # at flashinfer.py:50 already claims to do. Drop this entry once that lands.
+    - engine-1-gpu
 
   # Emit a manual (block) step for tests the diff did not select, so they can
   # still be triggered by hand. Set false to omit them entirely.
