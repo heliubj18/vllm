@@ -74,10 +74,36 @@ filter:
   #   kernels-quantization-test      passed 110m25s in #21, NVFP4 shard staged
   #   kernels-moe-test               passed 223m09s in #21, timeout x parallelism
   #   sequence-parallel              passed  41m32s in #15
-  #   v1-others-cpu                  402 cases / 1 failure in #23, see below
+  #   v1-others-cpu                  two commands dropped, five run
   #   engine-1-gpu                   denylisted, upstream fork bug
-  #   model-runner-v2-distributed    denylisted, same fork bug
+  #   model-runner-v2-distributed    affected command dropped, rest runs
   step_allowlist: []
+
+  # Individual commands dropped from a step that otherwise runs. A Buildkite step
+  # is atomic, so without this a single unrunnable command costs the whole step -
+  # and under fail_fast, everything queued behind it. Matching is a substring of
+  # the command text; a pattern that matches nothing is reported by --verbose.
+  #
+  # Prefer this over step_denylist whenever the step has commands worth keeping.
+  command_denylist:
+    v1-others-cpu:
+      # Both want more cards than this box can offer, because upstream runs this
+      # step on image-build-cpu where ParallelConfig's world-size-versus-visible-
+      # GPUs check is inert. Measured on one card: v1/core is 1 failed / 401
+      # passed (the failure wants world size 2), v1/kv_connector/unit is 2 failed
+      # (tp2 x pp2 = 4, and cards 2 and 3 are not ours). Raising the step to two
+      # cards was tried and only moved the count from 1 to 2. The step's other
+      # five commands need no device and are kept.
+      - "-m 'cpu_test' v1/core"
+      - "-m 'cpu_test' v1/kv_connector/unit"
+    model-runner-v2-distributed-2-gpus:
+      # Hits the flashinfer-poisons-fork bug described in the denylist below:
+      # test_basic_correctness.py:23 imports tests/utils, which initializes CUDA,
+      # and then tests/utils.py:1745 forks. The step's two DP commands do not
+      # import tests/utils and both pass by hand (test_async_llm_dp 14 selected of
+      # 18, test_eagle_dp 1 passed in 145s) - they had never run in CI because
+      # this command always crashed first.
+      - "basic_correctness/test_basic_correctness.py"
 
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
@@ -120,22 +146,10 @@ filter:
     # submodule_search_locations instead of find_spec, which is what the comment
     # at flashinfer.py:50 already claims to do. Drop this entry once that lands.
     - engine-1-gpu
-    # Same upstream bug, reached through a different import:
-    # test_basic_correctness.py:23 `from ..utils import multi_gpu_test` pulls in
-    # tests/utils.py, so the chain above runs, and then tests/utils.py:1745 forks
-    # - the log carries the matching DeprecationWarning at that exact line. The
-    # child starts a MultiProcExecutor worker, which dies at gpu_worker.py:369 on
-    # the poisoned context.
-    #
-    # Only the first of this step's three commands is affected. The two DP
-    # commands do not import tests/utils and both pass when run by hand
-    # (test_async_llm_dp 14 selected of 18, test_eagle_dp 1 passed in 145s). They
-    # have never run in CI though: the first command always crashes first, and a
-    # Buildkite step is atomic. So keeping this step would not buy that coverage,
-    # only a red build 43 seconds in - which under fail_fast cancels every GPU
-    # step queued behind it. Recovering those two needs command-level filtering,
-    # which the generator does not have.
-    - model-runner-v2-distributed-2-gpus
+    # model-runner-v2-distributed-2-gpus is NOT here: only one of its three
+    # commands hits the bug, so it is handled by command_denylist above and the
+    # step still runs its two DP commands. engine-1-gpu cannot be split that way -
+    # its whole second command is the affected pytest session.
 
   # Emit a manual (block) step for tests the diff did not select, so they can
   # still be triggered by hand. Set false to omit them entirely.
@@ -408,17 +422,20 @@ docker:
   # image rather than their cases. Indexes into gpus_by_devices above, falling
   # through to `gpus` when no entry matches.
   #
-  # v1-others-cpu: 401 of its 402 cases need no device at all, but
-  # test_scheduler.py::test_async_scheduling_pp_allows_rescheduling_with_output_placeholders
-  # builds a ParallelConfig with pipeline_parallel_size=2. It never touches a
-  # second card - measured 0.0 GiB allocated across the whole step - but on a CUDA
-  # image ParallelConfig checks the visible GPU count and rejects world size 2.
-  # Upstream does not hit this because the step runs on image-build-cpu, where that
-  # check is inert. Two cards costs nothing here since the step allocates no VRAM,
-  # and the alternative is one guaranteed failure per run, which under fail_fast
-  # cancels every GPU step queued behind it.
-  devices_by_step:
-    v1-others-cpu: 2
+  # Currently empty. v1-others-cpu was the motivating case and it turned out not
+  # to be solvable this way - kept as a record so the next person does not retry
+  # it. That step is marked `device: cpu-small` upstream and depends on
+  # image-build-cpu, where ParallelConfig's world-size-versus-visible-GPUs check
+  # is inert. On a CUDA image the check is live, and two of its commands trip it:
+  #
+  #   pytest -m cpu_test v1/core             1 failed / 401 passed, wants world size 2
+  #   pytest -m cpu_test v1/kv_connector/unit  2 failed, wants world size 4 (tp2 x pp2)
+  #
+  # Raising the step to 2 cards (measured: it still allocates 0.0 GiB) only moved
+  # the failure count from 1 to 2, because the kv_connector cases need 4 and cards
+  # 2 and 3 belong to someone else. Fixing this needs command-level filtering, not
+  # a device count.
+  devices_by_step: {}
 
   # Copy these out of the read-only checkout mounts into the container before
   # the step's own commands run, instead of letting the tests execute straight

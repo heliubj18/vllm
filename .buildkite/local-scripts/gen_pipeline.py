@@ -518,6 +518,33 @@ def _copy_commands(config: dict[str, Any]) -> list[str]:
     return out
 
 
+def _select_commands(step: Step, config: dict[str, Any]) -> list[str]:
+    """Drop commands this box cannot run, keeping the rest of the step.
+
+    A Buildkite step is atomic: one failing command fails the whole step, and
+    under fail_fast that cancels everything queued behind it. Upstream never
+    needs this because each step gets a machine sized for it, but here a single
+    step can mix commands that work with commands that cannot:
+
+      v1-others-cpu   `-m cpu_test v1/core` wants world size 2 and
+                      `-m cpu_test v1/kv_connector/unit` wants 4 (tp2 x pp2),
+                      while the other five commands need no device. Upstream runs
+                      the step on image-build-cpu, where ParallelConfig's
+                      world-size check is inert; on a CUDA image it is live.
+
+    Matching is a plain substring against the command text, so an entry stays
+    readable and survives the `$$` unescaping that happens later. A pattern that
+    matches nothing is reported by --verbose rather than failing the build: the
+    upstream command may simply have been reworded, and a stale entry that
+    silently keeps a command is safer than one that silently drops it.
+    """
+    drops = (config.get("filter") or {}).get("command_denylist") or {}
+    patterns = drops.get(step.key) or []
+    if not patterns:
+        return list(step.commands)
+    return [c for c in step.commands if not any(p in c for p in patterns)]
+
+
 def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     """Add JUnit reporting and the skip-ratio guard around upstream commands.
 
@@ -526,12 +553,15 @@ def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     command string.
     """
     prologue = _copy_commands(config)
+    commands = _select_commands(step, config)
 
     # Steps that never call pytest (static audits, cargo, shell checks) get no
     # report, so wrapping them would only add a spurious skip-ratio check. They
-    # still need the copy: their commands read from the checkout too.
-    if not _runs_pytest(step):
-        return prologue + list(step.commands)
+    # still need the copy: their commands read from the checkout too. Judged on
+    # the surviving commands, so a step whose only pytest call was filtered out
+    # does not get a report path pointing at a file nothing will write.
+    if not any("pytest" in c for c in commands):
+        return prologue + list(commands)
 
     report = config.get("report") or {}
     junit_dir = report.get("junit_dir") or "/vllm-workspace/test-reports"
@@ -551,7 +581,7 @@ def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     # PYTEST_ADDOPTS applies to every pytest process the step spawns, including
     # the ones launched from upstream's shell wrappers.
     out.append(f'export PYTEST_ADDOPTS="--junitxml={junit} -o junit_family=xunit2"')
-    out.extend(_unescape_dollars(c) for c in step.commands)
+    out.extend(_unescape_dollars(c) for c in commands)
 
     enforce = bool(report.get("skip_ratio_enforce", False))
     threshold = report.get("skip_ratio_default", 0.9)
