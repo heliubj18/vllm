@@ -60,7 +60,11 @@ filter:
 
   # Fallback only, for steps whose pytest targets cannot be resolved statically
   # (shell wrappers, generated arg lists). Everything else is tiered by `cost`.
-  auto_max_minutes: 20
+  #
+  # TEMPORARY: 20 normally. Raised while step_allowlist narrows the run, so
+  # Distributed DP Tests (35min upstream) emits as auto rather than needing a
+  # click. Restore to 20 with the allowlist.
+  auto_max_minutes: 40
 
   # A 4090 is slower than upstream's H200/H100, so scale the timeouts up.
   timeout_multiplier: 2.0
@@ -77,7 +81,26 @@ filter:
   #   v1-others-cpu                  two commands dropped, five run
   #   engine-1-gpu                   denylisted, upstream fork bug
   #   model-runner-v2-distributed    affected command dropped, rest runs
-  step_allowlist: []
+  # TEMPORARY: narrowed to the steps that have never yet reached a verdict, so a
+  # run does not spend 8.7 hours re-proving the ten that already pass. Their
+  # measured durations are in ~/doc/vllm-4090-step-durations.md; the three kernel
+  # steps alone are 434 minutes of that. Reset to [] once these are green.
+  step_allowlist:
+    - distributed-dp-tests-2-gpus
+    - distributed-compile-rpc-tests-2-gpus
+    - distributed-torchrun-shutdown-tests-2-gpus
+    - v1-e2e-2-gpus
+    - extract-hidden-states-integration-2-gpus
+    - metrics-tracing-2-gpus
+    - async-engine-inputs-utils-worker-config-cpu
+    - distributed-model-tests-2-gpus
+    - language-models-tests-granite-l4-compatibility
+    - multi-modal-processor-cpu
+    # Failed in #27 with 80 errors, all LocalEntryNotFoundError for
+    # Qwen/Qwen2-1.5B-Instruct. Staged since (2.9G, this step runs real
+    # inference so it needs weights, not just config).
+    - pytorch-fullgraph-cudagraph-l4-compatibility
+    - weight-loading-multiple-gpu
 
   # Individual commands dropped from a step that otherwise runs. A Buildkite step
   # is atomic, so without this a single unrunnable command costs the whole step -
@@ -150,6 +173,15 @@ filter:
     # commands hits the bug, so it is handled by command_denylist above and the
     # step still runs its two DP commands. engine-1-gpu cannot be split that way -
     # its whole second command is the affected pytest session.
+    #
+    # No Rust toolchain in the test image - `command -v cargo` and `rustc` both
+    # come back empty in vllm/vllm-openai:nightly, and these steps do nothing but
+    # call .buildkite/scripts/run-rust-frontend-cargo-ci.sh. Upstream builds a
+    # dedicated image for them. Installing a toolchain into the shared image is
+    # the same problem as plugin-tests-2-gpus: it would mutate site-packages-
+    # adjacent state for every concurrently queued step.
+    - rust-frontend-cargo-style-clippy
+    - rust-frontend-cargo-tests
 
   # Emit a manual (block) step for tests the diff did not select, so they can
   # still be triggered by hand. Set false to omit them entirely.
@@ -173,7 +205,12 @@ filter:
 cost:
   # Highest tier that still runs automatically. Everything above becomes a
   # manual (block) step.
-  auto_max_tier: T2
+  #
+  # TEMPORARY: T2 normally. Raised to T3 while step_allowlist narrows the run to
+  # the twelve steps that have never reached a verdict - eight are T3 (they spawn
+  # servers or sweep many models) and would otherwise emit as block steps needing
+  # a click, which defeats the point of the run. Restore to T2 with the allowlist.
+  auto_max_tier: T3
 
   # Distinct-model count at which a step is treated as a sweep (T3) regardless
   # of mechanism. Each distinct model is one more load into VRAM.
@@ -223,7 +260,11 @@ run_all_exclude_patterns:
 #
 # Set false when you want a full inventory of what is broken in one pass, which
 # is the better trade while bringing new steps online.
-fail_fast: true
+# TEMPORARY: off while step_allowlist above narrows the run to the steps that have
+# never reached a verdict. Fail-fast would cancel the rest on the first failure and
+# hide whether the others work, which is the whole point of this run. Turn back on
+# together with resetting step_allowlist to [].
+fail_fast: false
 
 # Injected into every generated test step.
 env:
