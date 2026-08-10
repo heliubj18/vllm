@@ -57,7 +57,12 @@ echo "--- Installing test dependencies"
 #                    way in build #29 - the steps needing them had never reached
 #                    collection, so "run the tests and see what is missing" could
 #                    not have found them earlier. All three are pinned upstream in
-#                    requirements/test/cuda.in.
+#                    requirements/test/cuda.in. decord and open_clip_torch joined
+#                    them later still: both are imported by a model's remote code
+#                    (ERNIE-4.5-VL, and C-RADIOv2-H which Nemotron VL pulls in),
+#                    not by any test, so they only appeared once those models were
+#                    staged. Note open_clip_torch installs as `open_clip` - the
+#                    ImportError names the module, not the package to install.
 "$VENV/bin/python" -m pip install --quiet --no-cache-dir --index-url "$INDEX" \
   pytest-asyncio \
   pytest-shard \
@@ -71,7 +76,9 @@ echo "--- Installing test dependencies"
   'torch-abi-audit==0.0.1' \
   'pqdm==0.2.0' \
   'av==16.1.0' \
-  'soundfile==0.12.1'
+  'soundfile==0.12.1' \
+  'decord==0.6.0' \
+  'open_clip_torch==2.32.0'
 
 # ray[cgraph] pulls cupy-cuda12x, but the image is CUDA 13 and ships
 # cupy-cuda13x. Both end up importable and the venv's copy wins through
@@ -89,7 +96,7 @@ import importlib
 
 for mod in ("pytest_asyncio", "pytest_shard", "pytest_timeout", "pytest_forked",
             "tblib", "ray", "multiprocess", "lm_eval", "torch_abi_audit",
-            "pqdm", "av", "soundfile"):
+            "pqdm", "av", "soundfile", "decord", "open_clip"):
     try:
         importlib.import_module(mod)
         print(f"  ok    {mod}")
