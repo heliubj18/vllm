@@ -59,7 +59,7 @@ def stage(repo_id: str) -> str:
         if target.exists():
             return "SKIP  already has config.json"
         target.write_text("{}\n")
-    return "OK    wrote %d config.json" % len(snapshots)
+    return f"OK    wrote {len(snapshots)} config.json"
 
 
 def main() -> int:
