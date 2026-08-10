@@ -225,9 +225,18 @@ filter:
 
   # Individual tests dropped with pytest --deselect, passed through
   # PYTEST_ADDOPTS so no upstream command string is rewritten. Use this rather
-  # than command_denylist when one test in a large command is the problem: node
-  # ids are relative to the workdir pytest runs in (/vllm-workspace/tests). A
-  # stale entry is inert - pytest ignores a --deselect target it cannot find.
+  # than command_denylist when one test in a large command is the problem.
+  #
+  # Node ids are resolved against pytest's rootdir, NOT the working directory the
+  # command runs in. We mount pyproject.toml, so pytest reports
+  # `rootdir: /vllm-workspace, configfile: pyproject.toml` while the commands run
+  # from /vllm-workspace/tests - meaning every id here needs the `tests/` prefix.
+  # Build #35 proved the point: without it the option was passed through intact
+  # and silently matched nothing. A stale entry is inert for the same reason, so
+  # a wrong path here fails open, never closed.
+  #
+  # To check an entry, look for "deselected" in the step's collection line rather
+  # than trusting the option to have applied.
   test_denylist:
     async-engine-inputs-utils-worker-config-cpu:
       # The flashinfer-poisons-fork bug again, and the only failure left in this
@@ -239,7 +248,7 @@ filter:
       #
       # Remove this entry once the flashinfer import is fixed upstream - the test
       # itself is sound and passes where CUDA is untouched at collection.
-      - "multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency"
+      - "tests/multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency"
 
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
