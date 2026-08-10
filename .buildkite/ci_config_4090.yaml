@@ -63,7 +63,9 @@ filter:
   #
   # TEMPORARY: 20 normally. Raised while step_allowlist narrows the run, so
   # Distributed DP Tests (35min upstream) emits as auto rather than needing a
-  # click. Restore to 20 with the allowlist.
+  # click. Restore to 20 with the allowlist. Build #28 measured that step at
+  # 26m14s, so 30 is enough to keep it auto once this goes back - the 40 was
+  # sized against upstream's declared timeout, before there was a measurement.
   auto_max_minutes: 40
 
   # A 4090 is slower than upstream's H200/H100, so scale the timeouts up.
@@ -127,6 +129,29 @@ filter:
       # 18, test_eagle_dp 1 passed in 145s) - they had never run in CI because
       # this command always crashed first.
       - "basic_correctness/test_basic_correctness.py"
+    distributed-compile-rpc-tests-2-gpus:
+      # Same flashinfer-poisons-fork bug: test_collective_rpc.py imports
+      # create_new_process_for_each_test from tests/utils, so CUDA is live before
+      # the bare os.fork(). Build #28 shows the mechanism directly - the mp
+      # parametrizations failed while ray-1 and ray-2 passed in the same session,
+      # and ray does not fork. The step's other two commands never ran because
+      # this one crashed first; keep them.
+      - "entrypoints/llm/test_collective_rpc.py"
+    distributed-torchrun-shutdown-tests-2-gpus:
+      # The same root cause wearing a different mask, which is why this one is
+      # worth spelling out. Build #28: 10 failed / 9 passed, but only 2 of the
+      # failures name CUDA. For the other 8, vLLM noticed the poisoned context
+      # and rescued itself - system_utils.py:157 "Overriding
+      # VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. Reasons: CUDA is initialized".
+      # Under spawn the child re-imports the module and gets a pristine
+      # LlamaForCausalLM, so the monkeypatched evil_method is gone: "Simulated
+      # Error" appears 0 times in the log and every pytest.raises reports DID NOT
+      # RAISE. A silent failure mode, not a shutdown bug - do not go looking for
+      # one in vllm/v1/engine. Entry point is
+      # test_startup_error.py:9 `from tests.utils import
+      # wait_for_gpu_memory_to_clear`; the whole v1/shutdown dir goes through it.
+      # The two torchrun commands and test_worker_memory_snapshot.py are clean.
+      - "pytest -v -s v1/shutdown"
 
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
