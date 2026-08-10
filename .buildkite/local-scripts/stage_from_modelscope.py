@@ -4,13 +4,13 @@
 
 """Stage HF-gated models from ModelScope into the HF cache layout.
 
-Two models the tests need are gated on huggingface.co and this account has no
-grant for them, so every file request returns 403 (401 without a token):
+Some models the tests need are gated on huggingface.co without a grant for this
+account, so every file request returns 403 (401 when no token is sent at all).
+That distinction is the useful one: 401 means fix the token, 403 means the token
+is fine and someone has to accept a licence on the Hub. Only the 403 set belongs
+here.
 
-    meta-llama/Llama-3.2-1B    tests/v1/engine/utils.py:24 TOKENIZER_NAME
-    google/gemma-3-1b-it       several model tests
-
-ModelScope mirrors both without gating. The catch is layout: ModelScope writes
+ModelScope mirrors them without gating. The catch is layout: ModelScope writes
 `<cache>/<org>/<name>/`, while the tests ask huggingface_hub for a repo id and
 it looks under `$HF_HOME/hub/models--<org>--<name>/snapshots/<rev>/`, with the
 revision read from `refs/main`. So download, then place.
@@ -41,6 +41,20 @@ import sys
 MODELS = {
     "meta-llama/Llama-3.2-1B": "LLM-Research/Llama-3.2-1B",
     "google/gemma-3-1b-it": "LLM-Research/gemma-3-1b-it",
+    # A second batch, same reason. These came back 403 rather than 401 with a
+    # valid token, meaning the token works but this account holds no grant for
+    # the repo - so waiting on a licence click is the only fix on the HF side.
+    # ModelScope mirrors them ungated. Note the id is not always under
+    # LLM-Research: two keep the original org name.
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct": (
+        "LLM-Research/Llama-4-Scout-17B-16E-Instruct"
+    ),
+    "meta-llama/Llama-Guard-4-12B": "LLM-Research/Llama-Guard-4-12B",
+    "meta-llama/Meta-Llama-3-8B-Instruct": "LLM-Research/Meta-Llama-3-8B-Instruct",
+    "facebook/chameleon-7b": "facebook/chameleon-7b",
+    "CohereLabs/command-a-vision-07-2025": "CohereLabs/command-a-vision-07-2025",
+    # nvidia/Eagle2.5-8B has no ModelScope mirror under any org tried, so it
+    # stays uncovered until the HF grant comes through.
 }
 
 HF_HUB = pathlib.Path(os.environ.get("HF_HOME", "/models/chengfeng-test")) / "hub"
@@ -54,10 +68,26 @@ REVISION = "modelscope-mirror"
 MS_METADATA = {"._____temp", ".mdl", ".msc", ".mv"}
 
 
-def download(ms_id: str) -> pathlib.Path:
+# Models whose tests only build a config or tokenizer, never load weights. For
+# these the weights are pure cost - Llama-4-Scout alone is several hundred GB -
+# so fetch metadata only. Everything absent from this set is downloaded whole,
+# which is what the models that do run inference need.
+CONFIG_ONLY = {
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "meta-llama/Llama-Guard-4-12B",
+    "meta-llama/Meta-Llama-3-8B-Instruct",
+    "facebook/chameleon-7b",
+    "CohereLabs/command-a-vision-07-2025",
+}
+
+CONFIG_PATTERNS = ["*.json", "*.txt", "*.model", "*.py"]
+
+
+def download(ms_id: str, config_only: bool = False) -> pathlib.Path:
     from modelscope import snapshot_download
 
-    return pathlib.Path(snapshot_download(ms_id, cache_dir=str(STAGING)))
+    kwargs = {"allow_patterns": CONFIG_PATTERNS} if config_only else {}
+    return pathlib.Path(snapshot_download(ms_id, cache_dir=str(STAGING), **kwargs))
 
 
 def place(hf_id: str, src: pathlib.Path) -> int:
@@ -93,7 +123,7 @@ def main() -> int:
     failed = []
     for hf_id, ms_id in MODELS.items():
         try:
-            src = download(ms_id)
+            src = download(ms_id, config_only=hf_id in CONFIG_ONLY)
         except Exception as exc:  # noqa: BLE001 - report and continue
             print(f"FAIL {hf_id}  download: {type(exc).__name__}: {exc}")
             failed.append(hf_id)
