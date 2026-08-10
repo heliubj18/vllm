@@ -69,6 +69,12 @@ echo "--- Installing test dependencies"
 #                    requirement, so this is a gap in this list rather than an
 #                    optional extra - the paired `cohere` package is not needed
 #                    because no step we run imports entrypoints/cohere.
+#                    num2words and albumentations are the same story once more,
+#                    and cuda.in names the exact tests in its comments. Neither is
+#                    imported by a test module: transformers' smolvlm processor
+#                    wants num2words, and Nemotron Parse's remote code wants
+#                    albumentations, so both only appear when a specific model is
+#                    processed.
 "$VENV/bin/python" -m pip install --quiet --no-cache-dir --index-url "$INDEX" \
   pytest-asyncio \
   pytest-shard \
@@ -85,7 +91,9 @@ echo "--- Installing test dependencies"
   'soundfile==0.12.1' \
   'decord==0.6.0' \
   'open_clip_torch==2.32.0' \
-  'cohere_melody==0.9.0'
+  'cohere_melody==0.9.0' \
+  'num2words==0.5.14' \
+  'albumentations==1.4.6'
 
 # ray[cgraph] pulls cupy-cuda12x, but the image is CUDA 13 and ships
 # cupy-cuda13x. Both end up importable and the venv's copy wins through
