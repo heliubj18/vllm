@@ -96,13 +96,16 @@ filter:
   #                                              runs real inference, so weights)
   #   extract-hidden-states-integration-2-gpus   passed  1m46s in #28
   #   metrics-tracing-2-gpus                     passed  1m38s in #28
+  # And build #29 cleared one more, which is the case command_denylist was built
+  # for: filtering its v1/shutdown command left three commands that had never run
+  # in CI (two torchrun --nproc-per-node=4 plus the memory-snapshot test) and all
+  # three passed. Denying the whole step would have thrown that coverage away.
+  #   distributed-torchrun-shutdown-tests-2-gpus passed  1m08s in #29
   step_allowlist:
     - distributed-compile-rpc-tests-2-gpus
-    - distributed-torchrun-shutdown-tests-2-gpus
     - v1-e2e-2-gpus
     - async-engine-inputs-utils-worker-config-cpu
     - distributed-model-tests-2-gpus
-    - language-models-tests-granite-l4-compatibility
     - multi-modal-processor-cpu
     - weight-loading-multiple-gpu
 
@@ -209,6 +212,16 @@ filter:
     # adjacent state for every concurrently queued step.
     - rust-frontend-cargo-style-clippy
     - rust-frontend-cargo-tests
+    # Same shape as the Rust steps, one layer deeper. Its first two commands are
+    # `uv pip install --no-build-isolation git+https://github.com/state-spaces/
+    # mamba@v2.3.0` and the same for causal-conv1d, and the image has no git:
+    # build #29 died in 5s with "error: Git operation failed / Git executable not
+    # found". Verified in the image - git ABSENT, and neither mamba_ssm nor
+    # causal_conv1d is preinstalled, so the installs are a hard prerequisite
+    # rather than a warm-up. Even with git they compile CUDA extensions from
+    # source on every run. Both fixes (add git, or prebake the wheels) mutate the
+    # image every concurrent step shares.
+    - language-models-tests-granite-l4-compatibility
 
   # Emit a manual (block) step for tests the diff did not select, so they can
   # still be triggered by hand. Set false to omit them entirely.
