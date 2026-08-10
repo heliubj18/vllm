@@ -63,6 +63,12 @@ echo "--- Installing test dependencies"
 #                    not by any test, so they only appeared once those models were
 #                    staged. Note open_clip_torch installs as `open_clip` - the
 #                    ImportError names the module, not the package to install.
+#                    cohere_melody came last, from tests/renderers/test_cohere.py,
+#                    which only ran once --deselect stopped an earlier command from
+#                    aborting the step. Upstream pins it in cuda.in as a plain test
+#                    requirement, so this is a gap in this list rather than an
+#                    optional extra - the paired `cohere` package is not needed
+#                    because no step we run imports entrypoints/cohere.
 "$VENV/bin/python" -m pip install --quiet --no-cache-dir --index-url "$INDEX" \
   pytest-asyncio \
   pytest-shard \
@@ -78,7 +84,8 @@ echo "--- Installing test dependencies"
   'av==16.1.0' \
   'soundfile==0.12.1' \
   'decord==0.6.0' \
-  'open_clip_torch==2.32.0'
+  'open_clip_torch==2.32.0' \
+  'cohere_melody==0.9.0'
 
 # ray[cgraph] pulls cupy-cuda12x, but the image is CUDA 13 and ships
 # cupy-cuda13x. Both end up importable and the venv's copy wins through
@@ -96,7 +103,7 @@ import importlib
 
 for mod in ("pytest_asyncio", "pytest_shard", "pytest_timeout", "pytest_forked",
             "tblib", "ray", "multiprocess", "lm_eval", "torch_abi_audit",
-            "pqdm", "av", "soundfile", "decord", "open_clip"):
+            "pqdm", "av", "soundfile", "decord", "open_clip", "cohere_melody"):
     try:
         importlib.import_module(mod)
         print(f"  ok    {mod}")
