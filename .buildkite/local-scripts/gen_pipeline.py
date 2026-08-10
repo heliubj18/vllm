@@ -623,6 +623,12 @@ def _select_commands(step: Step, config: dict[str, Any]) -> list[str]:
     return [c for c in step.commands if not any(p in c for p in patterns)]
 
 
+def _deselects(step: Step, config: dict[str, Any]) -> list[str]:
+    """pytest node ids to --deselect for this step, from filter.test_denylist."""
+    drops = (config.get("filter") or {}).get("test_denylist") or {}
+    return list(drops.get(step.key) or [])
+
+
 def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     """Add JUnit reporting and the skip-ratio guard around upstream commands.
 
@@ -658,7 +664,15 @@ def _wrap_commands(step: Step, config: dict[str, Any]) -> list[str]:
     out.append("export BUILDKITE_PARALLEL_JOB_COUNT=${BUILDKITE_PARALLEL_JOB_COUNT:-1}")
     # PYTEST_ADDOPTS applies to every pytest process the step spawns, including
     # the ones launched from upstream's shell wrappers.
-    out.append(f'export PYTEST_ADDOPTS="--junitxml={junit} -o junit_family=xunit2"')
+    addopts = [f"--junitxml={junit}", "-o junit_family=xunit2"]
+    # Individual tests dropped with --deselect. This is the finer-grained sibling
+    # of command_denylist: that one loses every test in a command, which for a
+    # command like `-m cpu_test multimodal` means giving up a few hundred passing
+    # cases to skip one. --deselect goes through PYTEST_ADDOPTS so no command
+    # string is rewritten, and a stale entry is inert rather than fatal - pytest
+    # ignores a --deselect target that does not exist.
+    addopts += [f"--deselect {t}" for t in _deselects(step, config)]
+    out.append(f'export PYTEST_ADDOPTS="{" ".join(addopts)}"')
     out.extend(_unescape_dollars(c) for c in commands)
 
     enforce = bool(report.get("skip_ratio_enforce", False))

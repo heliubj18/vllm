@@ -223,6 +223,24 @@ filter:
       # The two torchrun commands and test_worker_memory_snapshot.py are clean.
       - "pytest -v -s v1/shutdown"
 
+  # Individual tests dropped with pytest --deselect, passed through
+  # PYTEST_ADDOPTS so no upstream command string is rewritten. Use this rather
+  # than command_denylist when one test in a large command is the problem: node
+  # ids are relative to the workdir pytest runs in (/vllm-workspace/tests). A
+  # stale entry is inert - pytest ignores a --deselect target it cannot find.
+  test_denylist:
+    async-engine-inputs-utils-worker-config-cpu:
+      # The flashinfer-poisons-fork bug again, and the only failure left in this
+      # step: enable_sleep_mode=True makes the engine core fork, and CUDA is
+      # already initialized by collection time, so it dies with "Cannot
+      # re-initialize CUDA in forked subprocess". Dropping the whole
+      # `-m cpu_test multimodal` command would cost a few hundred passing cases
+      # to skip this one, which is what test_denylist exists to avoid.
+      #
+      # Remove this entry once the flashinfer import is fixed upstream - the test
+      # itself is sound and passes where CUDA is untouched at collection.
+      - "multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency"
+
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
     # The PD scripts run an unfiltered `pkill -9 -f "vllm serve"`. Safe inside a
