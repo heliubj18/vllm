@@ -87,21 +87,23 @@ filter:
   # run does not spend 8.7 hours re-proving the ten that already pass. Their
   # measured durations are in ~/doc/vllm-4090-step-durations.md; the three kernel
   # steps alone are 434 minutes of that. Reset to [] once these are green.
+  # Build #28 cleared four of the twelve, so they come off. Leaving a passing
+  # entry here is not free: it is queue time ahead of whatever is still unproven,
+  # and gpu_slots is 1 so the queue is serial. distributed-dp-tests alone is 26m.
+  #   distributed-dp-tests-2-gpus                passed 26m13s in #28
+  #   pytorch-fullgraph-cudagraph-l4             passed 11m49s in #28 (2.9G of
+  #                                              Qwen2-1.5B-Instruct staged; it
+  #                                              runs real inference, so weights)
+  #   extract-hidden-states-integration-2-gpus   passed  1m46s in #28
+  #   metrics-tracing-2-gpus                     passed  1m38s in #28
   step_allowlist:
-    - distributed-dp-tests-2-gpus
     - distributed-compile-rpc-tests-2-gpus
     - distributed-torchrun-shutdown-tests-2-gpus
     - v1-e2e-2-gpus
-    - extract-hidden-states-integration-2-gpus
-    - metrics-tracing-2-gpus
     - async-engine-inputs-utils-worker-config-cpu
     - distributed-model-tests-2-gpus
     - language-models-tests-granite-l4-compatibility
     - multi-modal-processor-cpu
-    # Failed in #27 with 80 errors, all LocalEntryNotFoundError for
-    # Qwen/Qwen2-1.5B-Instruct. Staged since (2.9G, this step runs real
-    # inference so it needs weights, not just config).
-    - pytorch-fullgraph-cudagraph-l4-compatibility
     - weight-loading-multiple-gpu
 
   # Individual commands dropped from a step that otherwise runs. A Buildkite step
