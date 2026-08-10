@@ -163,8 +163,11 @@ filter:
   # in CI (two torchrun --nproc-per-node=4 plus the memory-snapshot test) and all
   # three passed. Denying the whole step would have thrown that coverage away.
   #   distributed-torchrun-shutdown-tests-2-gpus passed  1m08s in #29
+  # And #30/#31 cleared compile-rpc twice over, so it comes out too: on a
+  # gpu_slots: 1 queue a 38-minute passing step is 38 minutes the two steps still
+  # under debug spend waiting.
+  #   distributed-compile-rpc-tests-2-gpus       passed 38m05s in #30, again in #31
   step_allowlist:
-    - distributed-compile-rpc-tests-2-gpus
     - v1-e2e-2-gpus
     - async-engine-inputs-utils-worker-config-cpu
     - distributed-model-tests-2-gpus
