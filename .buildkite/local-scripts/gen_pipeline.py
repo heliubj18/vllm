@@ -110,7 +110,85 @@ def load_steps(test_areas: Path) -> list[Step]:
 
 def load_config(path: Path) -> dict[str, Any]:
     with open(path) as handle:
-        return yaml.safe_load(handle) or {}
+        config = yaml.safe_load(handle) or {}
+    _resolve_image(config)
+    return config
+
+
+def _resolve_image(config: dict[str, Any]) -> None:
+    """Apply the `images.use` preset over the top-level `image`/`always_pull`.
+
+    Swapping the image swaps what is under test - the test code comes from the
+    checkout either way - so this is the seam for running the same suite against
+    an internal build instead of upstream's.
+
+    The arch check is the part worth having. An image compiled without this box's
+    compute capability still starts, still imports vllm, and then fails somewhere
+    inside a kernel with a message about missing symbols or no kernel image. That
+    reads like a bug in the code under test and is not one. Refusing to generate a
+    pipeline is the cheaper failure.
+    """
+    images = config.get("images") or {}
+    presets = images.get("presets") or {}
+    name = images.get("use")
+    if not name:
+        return
+    if name not in presets:
+        raise SystemExit(
+            f"images.use is {name!r}, which is not in images.presets "
+            f"({', '.join(sorted(presets)) or 'empty'})"
+        )
+    preset = presets[name] or {}
+    if preset.get("image"):
+        config["image"] = preset["image"]
+    if "always_pull" in preset:
+        config.setdefault("docker", {})["always_pull"] = bool(preset["always_pull"])
+
+    # `arch_list` is what the image reports from torch.cuda.get_arch_list(); it
+    # has to be recorded by whoever adds the preset, since we cannot inspect a
+    # not-yet-pulled image at generation time on the mac agent.
+    arch = (config.get("hardware") or {}).get("arch")
+    declared = preset.get("arch_list")
+    if arch and declared is not None and not _arch_is_covered(arch, declared):
+        raise SystemExit(
+            f"image preset {name!r} declares arch_list {declared or '[]'}, which "
+            f"does not cover this box's {arch}.\n"
+            f"  image: {preset.get('image')}\n"
+            f"  note : {preset.get('note', '-')}\n"
+            "Rebuild with this architecture in torch_cuda_arch_list, or pick "
+            "another preset. Running anyway produces kernel failures that look "
+            "like defects in the code under test."
+        )
+
+
+def _preset_suffix(config: dict[str, Any]) -> str:
+    """Name the active preset in the summary, so a switch is visible at a glance."""
+    use = (config.get("images") or {}).get("use")
+    return f"   (preset: {use})" if use else ""
+
+
+def _arch_is_covered(arch: str, declared: list[str]) -> bool:
+    """Whether `declared` can run `arch` (e.g. sm89), natively or via PTX.
+
+    A cubin only runs on its exact target, so sm_89 needs sm_89. PTX is
+    forward-compatible within a major generation: sm_86 PTX runs on sm_89
+    because both are 8.x, but 10.0+PTX cannot lower to 8.9.
+
+    >>> _arch_is_covered("sm89", ["sm_86", "sm_90", "sm_120"])  # upstream image
+    True
+    >>> _arch_is_covered("sm89", ["sm_90", "sm_100", "sm_103"])  # novita overlay
+    False
+    >>> _arch_is_covered("sm89", [])
+    False
+    >>> _arch_is_covered("sm89", ["sm_89"])
+    True
+    >>> _arch_is_covered("sm90", ["sm_100"])
+    False
+    """
+    if arch in declared:
+        return True
+    major = arch.removeprefix("sm").lstrip("_")[:1]
+    return any(d.removeprefix("sm_")[:1] == major and d != arch for d in declared)
 
 
 # --------------------------------------------------------------------------
@@ -946,7 +1024,7 @@ def format_summary(
         "gpu_count        : {}   arch: {}".format(
             hardware.get("gpu_count"), hardware.get("arch")
         ),
-        f"image            : {config.get('image')}",
+        f"image            : {config.get('image')}{_preset_suffix(config)}",
         f"diff             : {diff_desc}",
         f"run-all          : {run_all or 'no'}",
         "",

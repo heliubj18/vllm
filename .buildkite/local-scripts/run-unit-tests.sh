@@ -29,3 +29,9 @@ python -m pytest "${TESTS[@]}" \
   --noconftest \
   -p no:cacheprovider \
   -v -ra
+
+# The generator's own pure-function checks live as doctests, so they run here
+# rather than needing a test file of their own. Currently the CUDA-arch coverage
+# rule, which decides whether an image can run on this box at all.
+echo "--- Generator doctests"
+python -m doctest .buildkite/local-scripts/gen_pipeline.py && echo "doctests passed"

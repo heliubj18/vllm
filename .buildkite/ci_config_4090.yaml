@@ -30,7 +30,69 @@ hardware:
 # SM89, so kernels run through sm_86 PTX forward-compatibility rather than
 # natively. Fine for exercising the pipeline; revisit before trusting the three
 # must-run kernel steps as SM89 coverage.
+#
+# Selected by `images.use` below. Kept as a top-level key because the generator
+# and the summary both read `image`; `images.use` just picks which preset fills
+# it, so a config that never sets `images` behaves exactly as before.
 image: "vllm/vllm-openai:nightly"
+
+# Named image presets. The point of this block is switching the image under test
+# without editing anything else: the test code comes from the checkout, so
+# swapping the image swaps *what is being tested* while the tests stay put.
+#
+# Set `use:` to a key below. Anything the preset does not define falls back to
+# the top-level `image` and to docker.always_pull.
+images:
+  use: upstream-nightly
+
+  presets:
+    upstream-nightly:
+      image: "vllm/vllm-openai:nightly"
+      # Present on the test host already, and its docker directory has little
+      # room to spare, so do not re-pull. Note this makes the `nightly` tag a
+      # misnomer: it is pinned to whatever was pulled on 2026-08-07
+      # (0.26.1rc1.dev403+g821717118), not to today's nightly.
+      always_pull: false
+      arch_list: ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120"]
+      note: "upstream official image; SM89 via sm_86 PTX, not native"
+
+    # Internal overlay builds from novitalabs/vllm-int. These are what we
+    # actually want to test - same tests, different vLLM underneath - but see
+    # `arch_list` before switching: the 2026-08-09 build was compiled for
+    # `torch_cuda_arch_list=9.0 10.0+PTX 10.3` (H100 and B200 class). There is
+    # no 8.9 and no PTX that can lower to it, so the internal kernel extensions
+    # (_novita_C.abi3.so, sgl-kernel) have nothing loadable on a 4090. Any test
+    # touching them fails for architecture reasons rather than for anything in
+    # the code under test, which is worse noise than not running it.
+    #
+    # Fixing it is one build argument, not a redesign:
+    #   --build-arg torch_cuda_arch_list="8.9 9.0 10.0+PTX 10.3"
+    #
+    # Second prerequisite, independent of the first: this overlay is based on
+    # v0.23.0, while our tests/ come from a main checkout (0.26.1rc1). That is
+    # three minor releases of API drift, so most failures would be version skew
+    # rather than the internal changes. Align the checkout to the upstream commit
+    # the overlay was built against - VLLM_COMMIT=0fc695fc6d1d in that run, which
+    # is more precise than the v0.23.0 tag.
+    #
+    # It does ship git (verified /usr/bin/git), so switching would let
+    # language-models-tests-granite-l4-compatibility come off the denylist.
+    novita-overlay-glm52:
+      image: "ghcr.io/novitalabs/vllm:overlay-release-v0.23.0-glm-5.2-layer-split-e1c0da5"
+      # ghcr, and not on the host yet. Third prerequisite: ghcr.io/novitalabs is
+      # private, so the test host needs `docker login ghcr.io` once beforehand -
+      # the generator deliberately does not do this, because putting a registry
+      # token into the pipeline is a credential decision, not a generator one.
+      # Once the host has logged in, its docker config holds the credential and
+      # always_pull works with no token anywhere in this repo. Alternatively
+      # pre-pull the image and set always_pull: false, as upstream-nightly does.
+      always_pull: true
+      registry: ghcr.io
+      arch_list: []
+      note: "NOT USABLE on 4090 yet - built for 9.0/10.0/10.3, no 8.9"
+      source_run: "https://github.com/novitalabs/vllm-int/actions/runs/31299759232"
+      base_image: "vllm/vllm-openai:v0.23.0-ubuntu2404"
+      upstream_commit: "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665"
 
 filter:
   # Steps pinned to hardware we do not have. A step with no `device:` field is
