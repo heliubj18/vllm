@@ -667,6 +667,18 @@ docker:
     # which is the opposite of the model cache next door, where a delete means
     # re-downloading tens of GB.
     - "/models/chengfeng-ci/vllm-cache:/vllm-cache"
+    # Test assets (sample videos and images) that vllm.assets fetches at runtime.
+    # These do NOT live under HF_HOME or VLLM_CACHE_ROOT: assets/base.py resolves
+    # get_cache_dir() to ~/.cache/vllm/assets, which neither variable moves. So
+    # staging the file in the HF cache is not enough - the code looks somewhere
+    # else entirely, and under --rm that somewhere else is empty on every run.
+    #
+    # download_video_asset() checks `video_directory / filename` before calling
+    # hf_hub_download, so a plain file at the right path makes it skip the network
+    # instead of failing under HF_HUB_OFFLINE=1. Currently one asset is needed:
+    # VideoAsset("baby_reading") -> sample_demo_1.mp4, the only entry in that
+    # class's _NAME_TO_FILE map. Read-write because assets/base.py mkdirs it.
+    - "/models/chengfeng-ci/vllm-assets:/root/.cache/vllm/assets"
     # The host already had a populated HF cache before this pipeline existed,
     # holding several repos the tests want - including meta-llama/Llama-3.1-8B-Instruct
     # (15G on disk) and Llama-3.2-1B-Instruct. Those are symlinked into the
