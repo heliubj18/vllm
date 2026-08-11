@@ -75,6 +75,18 @@ echo "--- Installing test dependencies"
 #                    wants num2words, and Nemotron Parse's remote code wants
 #                    albumentations, so both only appear when a specific model is
 #                    processed.
+#
+#   version pins     sentencepiece is the odd one out: the image already ships it,
+#                    at 0.2.2, while cuda.txt pins 0.2.1. That one patch release
+#                    rejects a piece containing a null character, which is exactly
+#                    what InternVL2-2B's own tokenization_internlm2.py builds, so
+#                    every test touching that model died with "INTERNAL: piece must
+#                    not include null character" - 96 of them in test_internvl.py
+#                    alone. Installing the pinned version here shadows the image's
+#                    copy through PYTHONPATH. So the rule is not only "install what
+#                    is missing": where the image and cuda.txt disagree on a
+#                    version, upstream's pin is the one the tests were written
+#                    against.
 "$VENV/bin/python" -m pip install --quiet --no-cache-dir --index-url "$INDEX" \
   pytest-asyncio \
   pytest-shard \
@@ -93,7 +105,8 @@ echo "--- Installing test dependencies"
   'open_clip_torch==2.32.0' \
   'cohere_melody==0.9.0' \
   'num2words==0.5.14' \
-  'albumentations==1.4.6'
+  'albumentations==1.4.6' \
+  'sentencepiece==0.2.1'
 
 # ray[cgraph] pulls cupy-cuda12x, but the image is CUDA 13 and ships
 # cupy-cuda13x. Both end up importable and the venv's copy wins through
@@ -111,12 +124,25 @@ import importlib
 
 for mod in ("pytest_asyncio", "pytest_shard", "pytest_timeout", "pytest_forked",
             "tblib", "ray", "multiprocess", "lm_eval", "torch_abi_audit",
-            "pqdm", "av", "soundfile", "decord", "open_clip", "cohere_melody"):
+            "pqdm", "av", "soundfile", "decord", "open_clip", "cohere_melody",
+            "num2words", "albumentations"):
     try:
         importlib.import_module(mod)
         print(f"  ok    {mod}")
     except ImportError as exc:
         raise SystemExit(f"  MISSING {mod}: {exc}")
+
+# sentencepiece needs its version checked, not just its presence: the image ships
+# a copy, so a plain import passes even when the venv's pinned one is absent and
+# the wrong version is what the tests actually load.
+import sentencepiece
+
+if sentencepiece.__version__ != "0.2.1":
+    raise SystemExit(
+        f"  WRONG sentencepiece {sentencepiece.__version__}, expected 0.2.1 "
+        f"(loaded from {sentencepiece.__file__})"
+    )
+print(f"  ok    sentencepiece {sentencepiece.__version__}")
 PY
 
 echo "--- Done. Size: $(du -sh "$VENV" | cut -f1)"
