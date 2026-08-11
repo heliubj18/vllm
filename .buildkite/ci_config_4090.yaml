@@ -250,6 +250,63 @@ filter:
       # itself is sound and passes where CUDA is untouched at collection.
       - "tests/multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency"
 
+      # Asserts on a *server-side* error message, so offline is structurally
+      # unable to produce it. The test fetches revision="main" (cached, fine) and
+      # then expects revision="never" to raise OSError matching "not a valid git
+      # identifier" - text the Hub returns when resolving a bad ref. With
+      # HF_HUB_OFFLINE=1 no resolve happens, so the raise is "We couldn't connect
+      # to 'https://huggingface.co' ... and couldn't find them in the cached
+      # files" instead. Right exception type, wrong message, and no amount of
+      # staging changes it: what is missing is the round trip, not a file.
+      #
+      # Same class as the multi-modal-processor-cpu Mistral block below - passes
+      # with HF_HUB_OFFLINE=0, kept out because of the shared-disk write gate.
+      - "tests/tokenizers_/test_basic.py::test_tokenizer_revision[facebook/opt-125m]"
+      - "tests/tokenizers_/test_basic.py::test_tokenizer_revision[openai-community/gpt2]"
+
+    distributed-model-tests-2-gpus:
+      # The flashinfer-poisons-fork bug a third time, and by far its widest hit:
+      # 7 of the 8 cases in the first command (`TARGET_TEST_SUITE=L4 pytest
+      # basic_correctness/ -m 'distributed(num_gpus=2)'`), build #40.
+      #
+      # Something imported at collection time initializes CUDA - the log shows
+      # `topk_topp_sampler.py:62 Using FlashInfer for top-p & top-k sampling` -
+      # so every forked worker dies in WorkerProc.__init__ -> worker.init_device()
+      # -> torch.accelerator.set_device_index with "Cannot re-initialize CUDA in
+      # forked subprocess. To use CUDA with multiprocessing, you must use the
+      # 'spawn' start method" (multiproc_executor.py:918).
+      #
+      # Both executor backends fail (ray and mp alike), which is the tell that the
+      # damage is done before the executor is chosen. The test itself documents the
+      # precondition it needs, at test_basic_correctness.py:243 - "vLLM needs a
+      # fresh new process without cuda initialization ... it will hurt
+      # multiprocessing backend with fork method (the default method)". Nothing is
+      # wrong with the test; its precondition is what got broken.
+      #
+      # VLLM_WORKER_MULTIPROC_METHOD=spawn does NOT fix this - measured, still
+      # 7 failed. That variable controls how vLLM starts its *workers*, but the
+      # fork here is the test framework's own: multi_gpu_test ->
+      # create_new_process_for_each_test -> fork_new_process_for_each_test ->
+      # os.fork() (tests/utils.py:1745, the "Fork a new process to run a test"
+      # line in the log). tests/utils.py:197 picks spawn only on ROCm and XPU.
+      # Two different forks; changing the first does nothing for the second.
+      #
+      # Note the ordering is the opposite of what the message suggests: vLLM
+      # itself gets all the way through weight loading, CUDA graph capture and a
+      # clean shutdown. The pytest *parent* has CUDA initialized by then, so the
+      # child it forks dies on first CUDA touch. The precondition that broke is
+      # the parent's CUDA state, not anything about the workers.
+      #
+      # Remove this block together with the multimodal/test_cache.py entry above:
+      # one upstream fix clears both.
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[True-facebook/opt-125m-ray--target_test_suites0-extra_env0]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[True-facebook/opt-125m-mp--target_test_suites1-extra_env1]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[True-meta-llama/Llama-3.2-1B-Instruct-mp--target_test_suites3-extra_env3]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[False-facebook/opt-125m-ray--target_test_suites0-extra_env0]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[False-facebook/opt-125m-mp--target_test_suites1-extra_env1]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[False-meta-llama/Llama-3.2-1B-Instruct-ray--target_test_suites2-extra_env2]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[False-meta-llama/Llama-3.2-1B-Instruct-mp--target_test_suites3-extra_env3]"
+
     multi-modal-processor-cpu:
       # Four Mistral-format models, 3 hit_rate values each. These cannot pass
       # while HF_HUB_OFFLINE=1, and not because anything is missing from the
