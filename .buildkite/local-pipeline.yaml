@@ -1,0 +1,41 @@
+# Pipeline for a self-hosted buildkite-agent running directly on macOS
+# (no docker). Point your Buildkite pipeline's initial step at:
+#   buildkite-agent pipeline upload .buildkite/local-pipeline.yaml
+#
+# This is NOT part of vLLM upstream CI - it only exists to exercise the
+# GitHub -> Buildkite -> local agent path on a dev machine.
+
+agents:
+  queue: local-mac
+
+env:
+  UV_PYTHON: "3.12"
+  PRE_COMMIT_HOME: "$HOME/.cache/pre-commit-bk"
+
+steps:
+  - label: ":wave: Hello world"
+    command: |
+      echo "Hello world from $(hostname)"
+      echo "arch: $(uname -m)"
+      echo "branch: $BUILDKITE_BRANCH  commit: ${BUILDKITE_COMMIT:0:8}"
+
+  - label: ":mag: Environment"
+    command: .buildkite/local-scripts/env-info.sh
+
+  - label: ":lock: Lint (ruff + typos + spdx)"
+    command: .buildkite/local-scripts/run-lint.sh
+
+  - label: ":pytest: Unit tests"
+    command: .buildkite/local-scripts/run-unit-tests.sh
+
+  # Selects which upstream test_areas steps this hardware can run and appends
+  # them to the current build, where the gpu-4090 agent picks them up. Not
+  # gated behind the steps above so a lint failure does not hide the selection.
+  - label: ":pipeline: Generate 4090 pipeline"
+    key: generate-4090-pipeline
+    command: .buildkite/local-scripts/upload-4090-pipeline.sh
+
+  - wait: ~
+
+  - label: ":white_check_mark: Local CI green"
+    command: 'echo "all local steps passed"'

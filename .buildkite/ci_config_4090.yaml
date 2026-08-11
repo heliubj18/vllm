@@ -1,0 +1,880 @@
+# Config for the local 4090 Buildkite pipeline.
+#
+# Consumed by .buildkite/local-scripts/gen_pipeline.py, which reads the
+# upstream step definitions in .buildkite/test_areas/ (never modified) and
+# emits a Buildkite pipeline targeting the local agents.
+#
+# This is NOT part of vLLM upstream CI.
+
+hardware:
+  # Shown in the selection summary. Set per platform so the report identifies
+  # which agent config produced it.
+  name: 2x4090
+  # Number of GPUs available on the test agent. Steps needing more are dropped.
+  gpu_count: 2
+  # Compute capability of the test agent (4090 = 8.9). Used for reporting only;
+  # actual gating is via filter.arch_blocklist below.
+  arch: sm89
+  queue_gpu: gpu-4090
+  queue_bootstrap: local-mac
+
+# Image the test steps run in. Supplies the compiled vLLM (torch 2.13.0+cu130,
+# the .so extensions, CUDA runtime); the test code itself comes from the
+# checkout via docker.volumes below, because these images carry no tests/.
+#
+# Present locally on the test host, so always_pull stays false - the host's
+# docker directory has little room to spare.
+#
+# Caveat: this image's torch.cuda.get_arch_list() is
+# ['sm_75','sm_80','sm_86','sm_90','sm_100','sm_120'] - no sm_89. A 4090 is
+# SM89, so kernels run through sm_86 PTX forward-compatibility rather than
+# natively. Fine for exercising the pipeline; revisit before trusting the three
+# must-run kernel steps as SM89 coverage.
+#
+# Selected by `images.use` below. Kept as a top-level key because the generator
+# and the summary both read `image`; `images.use` just picks which preset fills
+# it, so a config that never sets `images` behaves exactly as before.
+image: "vllm/vllm-openai:nightly"
+
+# Named image presets. The point of this block is switching the image under test
+# without editing anything else: the test code comes from the checkout, so
+# swapping the image swaps *what is being tested* while the tests stay put.
+#
+# Set `use:` to a key below. Anything the preset does not define falls back to
+# the top-level `image` and to docker.always_pull.
+images:
+  use: upstream-nightly
+
+  presets:
+    upstream-nightly:
+      image: "vllm/vllm-openai:nightly"
+      # Present on the test host already, and its docker directory has little
+      # room to spare, so do not re-pull. Note this makes the `nightly` tag a
+      # misnomer: it is pinned to whatever was pulled on 2026-08-07
+      # (0.26.1rc1.dev403+g821717118), not to today's nightly.
+      always_pull: false
+      arch_list: ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120"]
+      note: "upstream official image; SM89 via sm_86 PTX, not native"
+
+    # Internal overlay builds from novitalabs/vllm-int. These are what we
+    # actually want to test - same tests, different vLLM underneath - but see
+    # `arch_list` before switching: the 2026-08-09 build was compiled for
+    # `torch_cuda_arch_list=9.0 10.0+PTX 10.3` (H100 and B200 class). There is
+    # no 8.9 and no PTX that can lower to it, so the internal kernel extensions
+    # (_novita_C.abi3.so, sgl-kernel) have nothing loadable on a 4090. Any test
+    # touching them fails for architecture reasons rather than for anything in
+    # the code under test, which is worse noise than not running it.
+    #
+    # Fixing it is one build argument, not a redesign:
+    #   --build-arg torch_cuda_arch_list="8.9 9.0 10.0+PTX 10.3"
+    #
+    # Second prerequisite, independent of the first: this overlay is based on
+    # v0.23.0, while our tests/ come from a main checkout (0.26.1rc1). That is
+    # three minor releases of API drift, so most failures would be version skew
+    # rather than the internal changes. Align the checkout to the upstream commit
+    # the overlay was built against - VLLM_COMMIT=0fc695fc6d1d in that run, which
+    # is more precise than the v0.23.0 tag.
+    #
+    # It does ship git (verified /usr/bin/git), so switching would let
+    # language-models-tests-granite-l4-compatibility come off the denylist.
+    novita-overlay-glm52:
+      image: "ghcr.io/novitalabs/vllm:overlay-release-v0.23.0-glm-5.2-layer-split-e1c0da5"
+      # ghcr, and not on the host yet. Third prerequisite: ghcr.io/novitalabs is
+      # private, so the test host needs `docker login ghcr.io` once beforehand -
+      # the generator deliberately does not do this, because putting a registry
+      # token into the pipeline is a credential decision, not a generator one.
+      # Once the host has logged in, its docker config holds the credential and
+      # always_pull works with no token anywhere in this repo. Alternatively
+      # pre-pull the image and set always_pull: false, as upstream-nightly does.
+      always_pull: true
+      registry: ghcr.io
+      arch_list: []
+      note: "NOT USABLE on 4090 yet - built for 9.0/10.0/10.3, no 8.9"
+      source_run: "https://github.com/novitalabs/vllm-int/actions/runs/31299759232"
+      base_image: "vllm/vllm-openai:v0.23.0-ubuntu2404"
+      upstream_commit: "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665"
+
+filter:
+  # Steps pinned to hardware we do not have. A step with no `device:` field is
+  # kept: upstream routes those to its L4 pool, which is also SM89 + 24GB.
+  arch_blocklist:
+    - h100
+    - h200
+    - h200_18gb
+    - h200_35gb
+    - b200
+    - b200-k8s
+    - a100
+    - gh200
+    - dgx-spark
+    - ascend_npu
+    - intel_cpu
+    - intel_hpu
+    - intel_gpu
+    - arm_cpu
+    - amd_cpu
+    - zen5
+
+  # Device-name prefixes to exclude, for families with many variants. `mi*`
+  # covers every AMD GPU (mi250, mi300, mi325, ...); drop this on an AMD agent.
+  arch_blocklist_prefixes:
+    - mi
+
+  # Fallback only, for steps whose pytest targets cannot be resolved statically
+  # (shell wrappers, generated arg lists). Everything else is tiered by `cost`.
+  #
+  # TEMPORARY: 20 normally. Raised while step_allowlist narrows the run, so
+  # Distributed DP Tests (35min upstream) emits as auto rather than needing a
+  # click. Restore to 20 with the allowlist. Build #28 measured that step at
+  # 26m14s, so 30 is enough to keep it auto once this goes back - the 40 was
+  # sized against upstream's declared timeout, before there was a measurement.
+  auto_max_minutes: 40
+
+  # A 4090 is slower than upstream's H200/H100, so scale the timeouts up.
+  timeout_multiplier: 2.0
+
+  # When non-empty, only these step keys are considered (debugging aid). Keep it
+  # empty in normal operation: an entry that has already passed is queue spent
+  # re-proving it, and #22 lost five and a half hours that way.
+  #
+  # Every step that was ever narrowed to has now been accounted for:
+  #   kernels-attention-test         passed 119m25s in #17
+  #   kernels-quantization-test      passed 110m25s in #21, NVFP4 shard staged
+  #   kernels-moe-test               passed 223m09s in #21, timeout x parallelism
+  #   sequence-parallel              passed  41m32s in #15
+  #   v1-others-cpu                  two commands dropped, five run
+  #   engine-1-gpu                   denylisted, upstream fork bug
+  #   model-runner-v2-distributed    affected command dropped, rest runs
+  # TEMPORARY: narrowed to the steps that have never yet reached a verdict, so a
+  # run does not spend 8.7 hours re-proving the ten that already pass. Their
+  # measured durations are in ~/doc/vllm-4090-step-durations.md; the three kernel
+  # steps alone are 434 minutes of that. Reset to [] once these are green.
+  # Build #28 cleared four of the twelve, so they come off. Leaving a passing
+  # entry here is not free: it is queue time ahead of whatever is still unproven,
+  # and gpu_slots is 1 so the queue is serial. distributed-dp-tests alone is 26m.
+  #   distributed-dp-tests-2-gpus                passed 26m13s in #28
+  #   pytorch-fullgraph-cudagraph-l4             passed 11m49s in #28 (2.9G of
+  #                                              Qwen2-1.5B-Instruct staged; it
+  #                                              runs real inference, so weights)
+  #   extract-hidden-states-integration-2-gpus   passed  1m46s in #28
+  #   metrics-tracing-2-gpus                     passed  1m38s in #28
+  # And build #29 cleared one more, which is the case command_denylist was built
+  # for: filtering its v1/shutdown command left three commands that had never run
+  # in CI (two torchrun --nproc-per-node=4 plus the memory-snapshot test) and all
+  # three passed. Denying the whole step would have thrown that coverage away.
+  #   distributed-torchrun-shutdown-tests-2-gpus passed  1m08s in #29
+  # And #30/#31 cleared compile-rpc twice over, so it comes out too: on a
+  # gpu_slots: 1 queue a 38-minute passing step is 38 minutes the two steps still
+  # under debug spend waiting.
+  #   distributed-compile-rpc-tests-2-gpus       passed 38m05s in #30, again in #31
+  step_allowlist:
+    - v1-e2e-2-gpus
+    - async-engine-inputs-utils-worker-config-cpu
+    - distributed-model-tests-2-gpus
+    - multi-modal-processor-cpu
+    - weight-loading-multiple-gpu
+
+  # Individual commands dropped from a step that otherwise runs. A Buildkite step
+  # is atomic, so without this a single unrunnable command costs the whole step -
+  # and under fail_fast, everything queued behind it. Matching is a substring of
+  # the command text; a pattern that matches nothing is reported by --verbose.
+  #
+  # Prefer this over step_denylist whenever the step has commands worth keeping.
+  command_denylist:
+    v1-others-cpu:
+      # Both want more cards than this box can offer, because upstream runs this
+      # step on image-build-cpu where ParallelConfig's world-size-versus-visible-
+      # GPUs check is inert. Measured on one card: v1/core is 1 failed / 401
+      # passed (the failure wants world size 2), v1/kv_connector/unit is 2 failed
+      # (tp2 x pp2 = 4, and cards 2 and 3 are not ours). Raising the step to two
+      # cards was tried and only moved the count from 1 to 2. The step's other
+      # five commands need no device and are kept.
+      - "-m 'cpu_test' v1/core"
+      - "-m 'cpu_test' v1/kv_connector/unit"
+    model-runner-v2-distributed-2-gpus:
+      # Hits the flashinfer-poisons-fork bug described in the denylist below:
+      # test_basic_correctness.py:23 imports tests/utils, which initializes CUDA,
+      # and then tests/utils.py:1745 forks. The step's two DP commands do not
+      # import tests/utils and both pass by hand (test_async_llm_dp 14 selected of
+      # 18, test_eagle_dp 1 passed in 145s) - they had never run in CI because
+      # this command always crashed first.
+      - "basic_correctness/test_basic_correctness.py"
+    distributed-compile-rpc-tests-2-gpus:
+      # Same flashinfer-poisons-fork bug: test_collective_rpc.py imports
+      # create_new_process_for_each_test from tests/utils, so CUDA is live before
+      # the bare os.fork(). Build #28 shows the mechanism directly - the mp
+      # parametrizations failed while ray-1 and ray-2 passed in the same session,
+      # and ray does not fork. The step's other two commands never ran because
+      # this one crashed first; keep them.
+      - "entrypoints/llm/test_collective_rpc.py"
+    distributed-torchrun-shutdown-tests-2-gpus:
+      # The same root cause wearing a different mask, which is why this one is
+      # worth spelling out. Build #28: 10 failed / 9 passed, but only 2 of the
+      # failures name CUDA. For the other 8, vLLM noticed the poisoned context
+      # and rescued itself - system_utils.py:157 "Overriding
+      # VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. Reasons: CUDA is initialized".
+      # Under spawn the child re-imports the module and gets a pristine
+      # LlamaForCausalLM, so the monkeypatched evil_method is gone: "Simulated
+      # Error" appears 0 times in the log and every pytest.raises reports DID NOT
+      # RAISE. A silent failure mode, not a shutdown bug - do not go looking for
+      # one in vllm/v1/engine. Entry point is
+      # test_startup_error.py:9 `from tests.utils import
+      # wait_for_gpu_memory_to_clear`; the whole v1/shutdown dir goes through it.
+      # The two torchrun commands and test_worker_memory_snapshot.py are clean.
+      - "pytest -v -s v1/shutdown"
+
+  # Individual tests dropped with pytest --deselect, passed through
+  # PYTEST_ADDOPTS so no upstream command string is rewritten. Use this rather
+  # than command_denylist when one test in a large command is the problem.
+  #
+  # Node ids are resolved against pytest's rootdir, NOT the working directory the
+  # command runs in. We mount pyproject.toml, so pytest reports
+  # `rootdir: /vllm-workspace, configfile: pyproject.toml` while the commands run
+  # from /vllm-workspace/tests - meaning every id here needs the `tests/` prefix.
+  # Build #35 proved the point: without it the option was passed through intact
+  # and silently matched nothing. A stale entry is inert for the same reason, so
+  # a wrong path here fails open, never closed.
+  #
+  # To check an entry, look for "deselected" in the step's collection line rather
+  # than trusting the option to have applied.
+  test_denylist:
+    async-engine-inputs-utils-worker-config-cpu:
+      # The flashinfer-poisons-fork bug again, and the only failure left in this
+      # step: enable_sleep_mode=True makes the engine core fork, and CUDA is
+      # already initialized by collection time, so it dies with "Cannot
+      # re-initialize CUDA in forked subprocess". Dropping the whole
+      # `-m cpu_test multimodal` command would cost a few hundred passing cases
+      # to skip this one, which is what test_denylist exists to avoid.
+      #
+      # Remove this entry once the flashinfer import is fixed upstream - the test
+      # itself is sound and passes where CUDA is untouched at collection.
+      - "tests/multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency"
+
+      # Asserts on a *server-side* error message, so offline is structurally
+      # unable to produce it. The test fetches revision="main" (cached, fine) and
+      # then expects revision="never" to raise OSError matching "not a valid git
+      # identifier" - text the Hub returns when resolving a bad ref. With
+      # HF_HUB_OFFLINE=1 no resolve happens, so the raise is "We couldn't connect
+      # to 'https://huggingface.co' ... and couldn't find them in the cached
+      # files" instead. Right exception type, wrong message, and no amount of
+      # staging changes it: what is missing is the round trip, not a file.
+      #
+      # Same class as the multi-modal-processor-cpu Mistral block below - passes
+      # with HF_HUB_OFFLINE=0, kept out because of the shared-disk write gate.
+      - "tests/tokenizers_/test_basic.py::test_tokenizer_revision[facebook/opt-125m]"
+      - "tests/tokenizers_/test_basic.py::test_tokenizer_revision[openai-community/gpt2]"
+
+    distributed-model-tests-2-gpus:
+      # The flashinfer-poisons-fork bug a third time, and by far its widest hit:
+      # 7 of the 8 cases in the first command (`TARGET_TEST_SUITE=L4 pytest
+      # basic_correctness/ -m 'distributed(num_gpus=2)'`), build #40.
+      #
+      # Something imported at collection time initializes CUDA - the log shows
+      # `topk_topp_sampler.py:62 Using FlashInfer for top-p & top-k sampling` -
+      # so every forked worker dies in WorkerProc.__init__ -> worker.init_device()
+      # -> torch.accelerator.set_device_index with "Cannot re-initialize CUDA in
+      # forked subprocess. To use CUDA with multiprocessing, you must use the
+      # 'spawn' start method" (multiproc_executor.py:918).
+      #
+      # Both executor backends fail (ray and mp alike), which is the tell that the
+      # damage is done before the executor is chosen. The test itself documents the
+      # precondition it needs, at test_basic_correctness.py:243 - "vLLM needs a
+      # fresh new process without cuda initialization ... it will hurt
+      # multiprocessing backend with fork method (the default method)". Nothing is
+      # wrong with the test; its precondition is what got broken.
+      #
+      # VLLM_WORKER_MULTIPROC_METHOD=spawn does NOT fix this - measured, still
+      # 7 failed. That variable controls how vLLM starts its *workers*, but the
+      # fork here is the test framework's own: multi_gpu_test ->
+      # create_new_process_for_each_test -> fork_new_process_for_each_test ->
+      # os.fork() (tests/utils.py:1745, the "Fork a new process to run a test"
+      # line in the log). tests/utils.py:197 picks spawn only on ROCm and XPU.
+      # Two different forks; changing the first does nothing for the second.
+      #
+      # Note the ordering is the opposite of what the message suggests: vLLM
+      # itself gets all the way through weight loading, CUDA graph capture and a
+      # clean shutdown. The pytest *parent* has CUDA initialized by then, so the
+      # child it forks dies on first CUDA touch. The precondition that broke is
+      # the parent's CUDA state, not anything about the workers.
+      #
+      # Remove this block together with the multimodal/test_cache.py entry above:
+      # one upstream fix clears both.
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[True-facebook/opt-125m-ray--target_test_suites0-extra_env0]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[True-facebook/opt-125m-mp--target_test_suites1-extra_env1]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[True-meta-llama/Llama-3.2-1B-Instruct-mp--target_test_suites3-extra_env3]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[False-facebook/opt-125m-ray--target_test_suites0-extra_env0]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[False-facebook/opt-125m-mp--target_test_suites1-extra_env1]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[False-meta-llama/Llama-3.2-1B-Instruct-ray--target_test_suites2-extra_env2]"
+      - "tests/basic_correctness/test_basic_correctness.py::test_models_distributed[False-meta-llama/Llama-3.2-1B-Instruct-mp--target_test_suites3-extra_env3]"
+
+    multi-modal-processor-cpu:
+      # Four Mistral-format models, 3 hit_rate values each. These cannot pass
+      # while HF_HUB_OFFLINE=1, and not because anything is missing from the
+      # cache.
+      #
+      # is_mistral_model_repo() decides the format by asking whether the repo
+      # contains consolidated*.safetensors, and it asks through
+      # list_repo_files() -> hf_api().list_repo_files(), an HTTPS call to
+      # huggingface.co/api/models/<id>. That path only reads the local disk when
+      # the id is an existing filesystem path; a repo id goes to the Hub. Offline
+      # the call raises OfflineModeIsEnabled, repo_utils.py catches it and returns
+      # [], so the function is False for every repo regardless of what is cached.
+      # The models then fall back to the HF path with tokenizer_mode="mistral"
+      # and fail on "Mismatch in `image` token count ... ids=[0] and text=[75]".
+      #
+      # So downloading does not fix it: Ministral-3-3B's 4.67 GB
+      # consolidated.safetensors is staged and it still fails. (With
+      # VLLM_MODEL_REDIRECT_PATH mapping the id to its snapshot directory it does
+      # pass, because then the id *is* a path and the disk gets read - that is
+      # the mechanism, not a fix we want.)
+      #
+      # Worth being precise about what "unfixable" means here: these pass fine
+      # with HF_HUB_OFFLINE=0, since the probe can then reach the Hub. The reason
+      # not to do that is the shared disk (see HF_HUB_OFFLINE below), not a
+      # technical wall. If that tradeoff is ever revisited, delete this block.
+      #
+      # Note mistral-community/pixtral-12b is a different repo and passes; do not
+      # add it here.
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-mistralai/Ministral-3-3B-Instruct-2512]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-mistralai/Ministral-3-3B-Instruct-2512]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-mistralai/Ministral-3-3B-Instruct-2512]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-mistralai/Mistral-Small-3.1-24B-Instruct-2503]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-mistralai/Mistral-Small-3.1-24B-Instruct-2503]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-mistralai/Mistral-Small-3.1-24B-Instruct-2503]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-mistralai/Pixtral-12B-2409]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-mistralai/Pixtral-12B-2409]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-mistralai/Pixtral-12B-2409]"
+
+  # Steps excluded regardless of the rules above. Keep a reason on each entry.
+  step_denylist:
+    # The PD scripts run an unfiltered `pkill -9 -f "vllm serve"`. Safe inside a
+    # container's PID namespace, but verify the docker plugin does not share the
+    # host PID namespace before enabling these.
+    - nixlconnector-pd-edge-cases-2-gpus
+    - multiconnector-nixl-offloading-pd-accuracy-2-gpus
+    - multiconnector-nixl-offloading-pd-edge-cases-2-gpus
+    - hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
+    # Needs the CI image build pipeline, which this setup does not run.
+    - docker-build-metadata
+    # Seven `pip install -e ./plugins/...` calls, each paired with a later
+    # `pip uninstall`. Both halves are incompatible with how tests get into the
+    # container here: tests/ is mounted read-only, so building an editable wheel
+    # cannot write its build metadata ("Getting requirements to build editable
+    # did not run successfully", verified on the agent), and even with a
+    # writable mount the installs would mutate the image's site-packages, which
+    # is shared with every other concurrently-queued step. Upstream is fine
+    # because each step gets a throwaway container with the tests baked in.
+    # Revisit if these steps ever matter enough to justify a writable overlay.
+    - plugin-tests-2-gpus
+    # 11 of its cases die with "Cannot re-initialize CUDA in forked subprocess".
+    # Not our environment: collecting v1/engine imports tests/utils.py, whose
+    # line 49 `from vllm.model_executor.kernels.linear import ...` reaches
+    # all2all.py:25 -> flashinfer.py:174 `find_spec("flashinfer.comm")`. find_spec
+    # on a submodule has to import the parent package first, and importing
+    # flashinfer builds a CompilationContext at module scope
+    # (flashinfer/jit/env.py:148) that calls get_device_capability - so CUDA is
+    # live in the pytest parent before the fork in tests/utils.py:1746. Verified
+    # on a bare image with no mounts of ours: find_spec("flashinfer") leaves CUDA
+    # uninitialized, find_spec("flashinfer.comm") does not. Unrelated to
+    # container concurrency; a single container with nothing else running fails
+    # the same way.
+    #
+    # Same step, same error, same defence as upstream #47446, fixed by #47539 by
+    # making one module-level import lazy. That closed the qwen_triton_warmup
+    # path; this is a new instance through flashinfer. The fix belongs upstream
+    # in has_flashinfer_comm() - probe the submodule via the parent spec's
+    # submodule_search_locations instead of find_spec, which is what the comment
+    # at flashinfer.py:50 already claims to do. Drop this entry once that lands.
+    - engine-1-gpu
+    # model-runner-v2-distributed-2-gpus is NOT here: only one of its three
+    # commands hits the bug, so it is handled by command_denylist above and the
+    # step still runs its two DP commands. engine-1-gpu cannot be split that way -
+    # its whole second command is the affected pytest session.
+    #
+    # No Rust toolchain in the test image - `command -v cargo` and `rustc` both
+    # come back empty in vllm/vllm-openai:nightly, and these steps do nothing but
+    # call .buildkite/scripts/run-rust-frontend-cargo-ci.sh. Upstream builds a
+    # dedicated image for them. Installing a toolchain into the shared image is
+    # the same problem as plugin-tests-2-gpus: it would mutate site-packages-
+    # adjacent state for every concurrently queued step.
+    - rust-frontend-cargo-style-clippy
+    - rust-frontend-cargo-tests
+    # Same shape as the Rust steps, one layer deeper. Its first two commands are
+    # `uv pip install --no-build-isolation git+https://github.com/state-spaces/
+    # mamba@v2.3.0` and the same for causal-conv1d, and the image has no git:
+    # build #29 died in 5s with "error: Git operation failed / Git executable not
+    # found". Verified in the image - git ABSENT, and neither mamba_ssm nor
+    # causal_conv1d is preinstalled, so the installs are a hard prerequisite
+    # rather than a warm-up. Even with git they compile CUDA extensions from
+    # source on every run. Both fixes (add git, or prebake the wheels) mutate the
+    # image every concurrent step shares.
+    - language-models-tests-granite-l4-compatibility
+
+  # Emit a manual (block) step for tests the diff did not select, so they can
+  # still be triggered by hand. Set false to omit them entirely.
+  block_unselected: true
+
+# How a step's cost is estimated. Upstream's `timeout_in_minutes` is not used as
+# the primary signal: it is sized to include cold model downloads on upstream's
+# own network, so it measures bandwidth more than work. Model data is pre-staged
+# on the 4090 host and mounted into the container, so what remains is how a test
+# obtains its model, which the generator reads out of the test source:
+#
+#   T0  no model touched at all, or the step runs no pytest
+#   T1  in-process tests over a handful of models
+#   T2  loads weights into VRAM (LLM(...)/vllm_runner), or compiles in most files
+#   T3  spawns `vllm serve` per test, or sweeps many distinct models
+#
+# Timeout is consulted only for steps that stand up a server, where startup and
+# readiness polling are real cost that pre-staged weights do not remove and that
+# the source does not reveal. Those use filter.auto_max_minutes above. A step
+# that never starts a server is judged purely on its tier.
+cost:
+  # Highest tier that still runs automatically. Everything above becomes a
+  # manual (block) step.
+  #
+  # TEMPORARY: T2 normally. Raised to T3 while step_allowlist narrows the run to
+  # the twelve steps that have never reached a verdict - eight are T3 (they spawn
+  # servers or sweep many models) and would otherwise emit as block steps needing
+  # a click, which defeats the point of the run. Restore to T2 with the allowlist.
+  auto_max_tier: T3
+
+  # Distinct-model count at which a step is treated as a sweep (T3) regardless
+  # of mechanism. Each distinct model is one more load into VRAM.
+  many_models: 20
+
+  # Always run these, whatever the tier or diff says. For coverage that must not
+  # regress silently: kernel correctness on SM89 is the reason this agent exists,
+  # and a kernel break is both likely to be caught here and cheap to run.
+  # Overrides the tier gate and changed-file selection, but not the hardware
+  # layer above - a step needing 4 GPUs stays excluded regardless.
+  must_run:
+    # 38 in-process files, no engine, no server. Pure kernel compute.
+    - kernels-attention-test
+    # 51 files. Covers the fused MoE path this fork changes most often.
+    - kernels-moe-test
+    # 44 files. SM89 quantization kernels (marlin/gptq/awq).
+    - kernels-quantization-test
+
+# Any changed file matching these runs the full selected set, ignoring per-step
+# source_file_dependencies. Mirrors upstream's run_all_patterns.
+#
+# Keep this list narrow: anything here defeats incremental selection. The two
+# CI entries cover changes to the selection logic itself, so a config or
+# generator edit is validated against every viable step.
+run_all_patterns:
+  - setup.py
+  - CMakeLists.txt
+  - csrc/
+  - cmake/
+  - requirements/
+  - .buildkite/ci_config_4090.yaml
+  - .buildkite/local-scripts/gen_pipeline.py
+
+run_all_exclude_patterns:
+  - csrc/cpu/
+  - csrc/rocm/
+  - cmake/hipify.py
+  - cmake/cpu_extension.cmake
+
+# Abandon the run as soon as any step fails, rather than working through the
+# queue for a result that is already red.
+#
+# This matters more here than upstream. Every GPU step contends for one box with
+# gpu_slots: 1, so steps behind a failure are queued for a single slot and the
+# tail is long - Sequence Parallel alone is 41 minutes. Re-running after a fix
+# costs less than sitting through a run whose verdict is settled.
+#
+# Set false when you want a full inventory of what is broken in one pass, which
+# is the better trade while bringing new steps online.
+# TEMPORARY: off while step_allowlist above narrows the run to the steps that have
+# never reached a verdict. Fail-fast would cancel the rest on the first failure and
+# hide whether the others work, which is the whole point of this run. Turn back on
+# together with resetting step_allowlist to [].
+fail_fast: false
+
+# Injected into every generated test step.
+env:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  NCCL_CUMEM_HOST_ENABLE: "0"
+
+  # Upstream sets this only for the steps that need it (ROCm-specific models,
+  # Whisper deadlocks - see test-amd.yaml), never pipeline-wide, so we follow
+  # suit and leave it to the step's own commands, which reach the container
+  # unmodified. Forcing spawn globally is not the safe default it looks like:
+  # tests/basic_correctness/test_basic_correctness.py:244 documents ordering
+  # written against fork semantics.
+  #
+  # Removing it does NOT fix Model Runner V2 Distributed, which fails with
+  # "Cannot re-initialize CUDA in forked subprocess" either way - that one's
+  # root cause is a WorkerProc background exception, still unidentified.
+
+  # Where the model mount lands. Kept on /models (a separate 3.5T NVMe, ~1T free
+  # as of 2026-08-11 and shrinking as models are staged) because the root
+  # filesystem is tight. Models are downloaded once and never deleted, so repeat
+  # runs are offline and fast.
+  #
+  # /models itself is shared with other users' data, so only the
+  # chengfeng-test subdirectory is mounted, never /models.
+  HF_HOME: /models/chengfeng-test
+
+  # Two jobs, and the second one is the reason this is not merely a convenience.
+  #
+  # 1. Models are pre-staged, so a cache miss is a staging bug. Failing fast
+  #    beats silently pulling tens of GB mid-test and blowing the step's timeout.
+  #
+  # 2. It is the write gate on a shared disk. Multi-Modal Processor walks 400+
+  #    registry entries; today they cost kilobytes because only configs and
+  #    tokenizers are needed. Allow downloads and any cache miss pulls full
+  #    weights instead - Llama-4-Scout and Mistral-Large-3 are hundreds of GB
+  #    each. /models has ~1T free and 203G of it is other users' models, so a
+  #    runaway step does not just fail, it fills the disk under someone else's
+  #    work. Worse, it happens quietly: --rm discards the container but the
+  #    bytes stay in the mounted hub, and cleaning up afterwards means deleting
+  #    from a shared disk. Four entries under $HF_HOME/hub are still symlinks
+  #    into /models/.cache (opt-125m, Llama-3.2-1B-Instruct, Llama-3.1-8B-
+  #    Instruct, DeepSeek-V2-Lite); a write through one of those lands directly
+  #    in the read-only shared tree, which is how models--Qwen--Qwen3-8B picked
+  #    up six files it should never have had.
+  #
+  # On reachability, note the host and the container differ. The host cannot
+  # reach huggingface.co (DNS resolves, port 443 times out) and needs
+  # HF_ENDPOINT=https://hf-mirror.com, which is what the staging scripts use.
+  # Inside the container it is reachable: the image ships
+  # HTTP_PROXY=http://172.17.0.1:1081, a proxy on the host side of the docker
+  # bridge. So "we cannot reach the Hub from CI" is not true, and any offline
+  # failure that looks like a network problem is this variable instead. The
+  # reason not to switch it off is the shared disk above, not connectivity.
+  #
+  # To add a model deliberately, stage it on the host with HF_ENDPOINT set;
+  # test runs never need either variable.
+  HF_HUB_OFFLINE: "1"
+
+  # The serving images ship pytest but none of the test plugins upstream's
+  # commands rely on (pytest-shard's --shard-id, pytest-timeout's --timeout,
+  # pytest-forked's --forked, plus tblib for pickling test exceptions). They are
+  # installed once into a persistent venv on the host, and put on the path here
+  # rather than by rewriting commands: upstream calls a bare `pytest`, and this
+  # generator never edits upstream command strings.
+  #
+  # The venv is created with --system-site-packages, so torch and the compiled
+  # vllm still come from the image. The image's torch (2.13.0+cu130) already
+  # matches what requirements/test/cuda.in pins, so nothing overwrites it.
+  PYTHONPATH: /test-venv/lib/python3.12/site-packages
+
+  # Point vLLM's cache root at the persistent mount above, so torch.compile
+  # results survive the container. Defaults to ~/.cache/vllm, which is inside
+  # the image.
+  VLLM_CACHE_ROOT: /vllm-cache
+
+# Dispatch order inside the concurrency queue. Higher runs first.
+#
+# Matters only when more than one PR is open. gpu_slots is 1, so every build's
+# GPU steps share one organization-wide queue, and Buildkite drains it in
+# dispatch order - one PR's 100-minute kernel sweep can sit ahead of another PR's
+# 4-minute step, making the second PR wait the full 100 minutes for a verdict it
+# could have had at once.
+#
+# This only reorders what is already queued. It does not change which steps run,
+# how many run at once, or the total time to drain the queue.
+priority:
+  enabled: true
+
+  # Cheap steps first. Note this is NOT ordered by importance: cost.must_run is
+  # deliberately left at the default priority even though it is the coverage that
+  # matters most. Those three kernel steps carry 100-130 minute timeouts and
+  # Kernels Attention measured 100 minutes here, so fronting them would make a
+  # second PR wait ~5 hours before its own steps dispatch at all. must_run
+  # guarantees a step runs, not that it runs early.
+  #
+  # Upstream's timeout is a bad absolute cost model - it is sized for cold model
+  # downloads on upstream's network, which pre-staged weights remove, which is why
+  # cost tiers exist at all. For ordering it is good enough: monotonic with the
+  # work, and a wrong guess only changes queue order. Replace with measured
+  # durations once the JUnit reports have been collected across a full run.
+  short: 5
+  short_max_minutes: 15
+
+# Serializing execution on the test agent.
+#
+# Buildkite dispatches steps in parallel by default. Upstream can allow that
+# because it routes each step shape to its own elastic queue (gpu_1_queue,
+# gpu_4_queue) where concurrent steps land on separate machines. Here every step
+# targets one box and asks the docker plugin for `gpus: all`, so two concurrent
+# steps would contend for the same VRAM - showing up as OOMs and NCCL failures
+# that look like flaky tests.
+#
+# Buildkite has three ordering tools and only one fits:
+#   depends_on  - expresses "B needs A's result". Wrong tool: these steps are
+#                 independent, and a chain of 26 would also serialize the CPU
+#                 steps needlessly and make one failure block the rest.
+#   wait        - a pipeline-wide barrier. Too coarse, and it does not limit
+#                 anything within a group of parallel steps.
+#   concurrency - caps how many jobs from a group run at once, across builds.
+#                 This is the resource-contention tool, so it is what we use.
+concurrency:
+  # Set false to emit no concurrency keys, e.g. if the agent already runs with
+  # spawn=1 and you would rather rely on that.
+  enabled: true
+
+  # Groups are organization-wide, so the queue name is folded into the group to
+  # keep different hardware from blocking each other.
+  group_prefix: vllm-ci
+
+  # The two limits below bound different resources and are deliberately not a
+  # single total. Buildkite has no mutual exclusion between concurrency groups,
+  # so they add up: gpu_slots 1 + cpu_slots 2 permits three containers at once.
+  # That is intended - only one of them is competing for VRAM.
+
+  # GPU steps that may run at once, across every build. This single number is
+  # what keeps several open PRs from stacking GPU work on one box: the group is
+  # organization-wide, so PR A's kernel step and PR B's kernel step queue against
+  # each other instead of each getting a slot.
+  #
+  # Keep at 1 unless the box has the VRAM to back more. A step is handed every
+  # device in docker.gpus, not a slice, so two concurrent steps need roughly
+  # twice the VRAM. Two 1-GPU steps would fit these two cards, but Buildkite
+  # counts jobs rather than weights, so it cannot be told "this step needs both
+  # devices" - raising this would let two 2-GPU steps collide. Real parallelism
+  # also needs BUILDKITE_AGENT_SPAWN > 1 on the agent, which is 1 today, so
+  # raising this alone changes nothing.
+  gpu_slots: 1
+
+  # CPU-only steps run concurrently with each other and with GPU work. They are
+  # handed the devices (importing vllm needs libcuda.so.1) but allocate no VRAM -
+  # measured at 1 MiB while running - so they are bounded by host RAM and cores
+  # rather than by the cards.
+  #
+  # Note these are upstream's CPU markings, meaning "performs no GPU compute".
+  # Running them in a truly GPU-less container is not an option here: it was
+  # tested, and all three sample tests fail at import. That needs a CPU-built
+  # image, which needs the image build step that does not exist yet.
+  cpu_slots: 2
+
+  # How many single-device steps may run at once, in their own group. Commented
+  # out, so they currently share the gpu_slots queue and stay serial.
+  #
+  # Two reasons it is off rather than set to 2. First, it would do nothing today:
+  # the agent runs BUILDKITE_AGENT_SPAWN=1, so one agent claims one job at a time
+  # regardless of what Buildkite is willing to dispatch. Second, Buildkite has no
+  # mutual exclusion between groups, so a 1-device step could run alongside a
+  # 2-device step - three devices' worth of demand on two cards, sharing device 0.
+  # Kernel tests coexist there (460 MiB measured), a step that loads weights into
+  # that same card would not.
+  #
+  # So enabling this means: raise SPAWN on the agent, and accept the overlap or
+  # first partition the cards so the two groups cannot touch the same device.
+  # gpu1_slots: 2
+
+# Settings for the docker plugin on the *test* agent. The generating agent never
+# runs docker; it only serializes these into the pipeline it uploads, and the GPU
+# agent's docker plugin consumes them.
+docker:
+  # Pull the image on every run. Leave false while iterating on a local image.
+  always_pull: false
+  # Docker's default 64MB is not enough for vLLM's multiprocessing.
+  shm_size: "8gb"
+
+  # The serving images set ENTRYPOINT to `vllm serve`. Without overriding it the
+  # step's commands are parsed as arguments to that (the shell's -c became
+  # --compilation-config) and every job exits 125 before running anything.
+  entrypoint: "bash"
+
+  # Do not let the plugin mount the whole checkout over workdir (its default).
+  # The volumes below mount tests/ and .buildkite/ deliberately; mounting the
+  # repository root as well would put the checkout's vllm/ source directory on
+  # sys.path, shadowing the image's compiled package.
+  mount_checkout: false
+
+  # Which GPUs a test step may use. NOT "all": this host has 8 RTX 4090s and
+  # other people run jobs on some of them, so seizing every device would OOM
+  # their work. Pin to the two this agent owns. Keep in step with
+  # hardware.gpu_count above.
+  gpus: '"device=0,1"'
+
+  # Per-step allocation, keyed by upstream's num_devices. A step that declares one
+  # device gets one card instead of both, which is what makes two of them able to
+  # share this box; steps declaring two fall through to `gpus` above.
+  #
+  # Of the 25 steps currently selected, 19 need GPUs and 9 of those need a single
+  # card - so this is the majority case, and until now each of them held both.
+  #
+  # CPU-marked steps also land on the 1-device entry. They allocate no VRAM
+  # (measured at 1 MiB) but do need a device visible, because importing vllm loads
+  # a .so linked against libcuda.so.1.
+  #
+  # Values are written literally into the pipeline: the docker plugin forwards this
+  # field verbatim (hooks/command:381) and only expands variables inside volume
+  # paths, so a '$VAR' here would reach docker as a literal string.
+  gpus_by_devices:
+    1: '"device=0"'
+
+  # Override the device count for steps whose upstream marking describes their
+  # image rather than their cases. Indexes into gpus_by_devices above, falling
+  # through to `gpus` when no entry matches.
+  #
+  # Currently empty. v1-others-cpu was the motivating case and it turned out not
+  # to be solvable this way - kept as a record so the next person does not retry
+  # it. That step is marked `device: cpu-small` upstream and depends on
+  # image-build-cpu, where ParallelConfig's world-size-versus-visible-GPUs check
+  # is inert. On a CUDA image the check is live, and two of its commands trip it:
+  #
+  #   pytest -m cpu_test v1/core             1 failed / 401 passed, wants world size 2
+  #   pytest -m cpu_test v1/kv_connector/unit  2 failed, wants world size 4 (tp2 x pp2)
+  #
+  # Raising the step to 2 cards (measured: it still allocates 0.0 GiB) only moved
+  # the failure count from 1 to 2, because the kv_connector cases need 4 and cards
+  # 2 and 3 belong to someone else. Fixing this needs command-level filtering, not
+  # a device count.
+  devices_by_step: {}
+
+  # Copy these out of the read-only checkout mounts into the container before
+  # the step's own commands run, instead of letting the tests execute straight
+  # off the mount.
+  #
+  # The agent's working directory is per *agent instance*, not per build:
+  # /opt/buildkite/builds/<agent-name>/<org>/<pipeline>, with no build number in
+  # the path. So every build this agent handles reuses one checkout, and each job
+  # begins with `git clean -ffxdq` plus a checkout of its own build's commit.
+  #
+  # The mounts are live, not snapshots - verified by inode (host and container
+  # both saw 27965847 for tests/conftest.py) and by creating a file host-side
+  # that appeared in the running container immediately. So when a job from
+  # another PR starts, a step still running sees its tests/ replaced underneath
+  # it, mid-run. Nothing errors; the step simply finishes against the wrong
+  # source and reports under its own commit. That failure mode is silent and
+  # reads as flakiness.
+  #
+  # Copying is cheap enough not to trade off: tests/ is 22M across 1833 files
+  # and copies in 0.25s, against steps that run 40-100 minutes. (The 361M
+  # checkout is mostly .git, 247M, which is never mounted.)
+  #
+  # Serialization does not remove the need for this. gpu_slots: 1 keeps GPU
+  # steps from overlapping, but cpu_slots: 2 already allows two CPU steps at
+  # once, and a CPU step from one build can overlap a GPU step from another.
+  copy_from_checkout:
+    - tests
+    - .buildkite
+    - pyproject.toml
+
+  # Host mounts, all on the *test* agent. Two groups:
+  #
+  # 1. The test code. The vllm/vllm-openai images are slim serving images and
+  #    carry no tests/ at all (upstream builds tests into the `test` stage of
+  #    docker/Dockerfile instead), so tests come from the Buildkite checkout.
+  #    Only tests/, .buildkite/ and pyproject.toml are mounted - never the
+  #    repository root. Mounting the root puts the checkout's own vllm/ source
+  #    directory on sys.path, where it shadows the compiled package in the
+  #    image and every kernel test dies with
+  #    "_OpNamespace '_C' object has no attribute gelu_fast".
+  #
+  # 2. Model data and the test-dependency venv, pre-staged on the host and kept
+  #    across runs. Read-write on purpose: vLLM's weight loader takes a filelock
+  #    inside the cache dir (weight_utils.get_lock) and huggingface_hub writes
+  #    refs and blob symlinks even on a cache hit, so :ro fails every model test.
+  #
+  # $BUILDKITE_BUILD_CHECKOUT_PATH is expanded by the agent, so the same config
+  # works for any build. Host and agent-container build paths are identical
+  # (/opt/buildkite/builds), which is what makes these mounts resolve correctly
+  # under docker-outside-of-docker.
+  volumes:
+    # Mounted at a staging path, NOT directly at /vllm-workspace. Each step
+    # copies them into place before running - see docker.copy_from_checkout and
+    # the long comment on _copy_commands() in gen_pipeline.py. Mounting them
+    # where the tests run would expose every step to another build's checkout
+    # switch, because the agent reuses one working directory per agent instance
+    # for every build it handles.
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/tests:/checkout-ro/tests:ro"
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/.buildkite:/checkout-ro/.buildkite:ro"
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/pyproject.toml:/checkout-ro/pyproject.toml:ro"
+    # 1.1G of pytest plugins and test-only libraries, built by
+    # local-scripts/setup-test-venv.sh. On /models rather than the root
+    # filesystem, which sits at 95% with 50G left. The venv records only the
+    # in-container path (/test-venv) in pyvenv.cfg and its shebangs, so the host
+    # side can be moved with a plain mv - nothing inside it needs rebuilding.
+    #
+    # Kept in chengfeng-ci/, a sibling of the model directory rather than a
+    # child: HF_HOME points at chengfeng-test, so anything under it shows up
+    # alongside hub/ as if it were cache content.
+    - "/models/chengfeng-ci/test-venv:/test-venv"
+    - "/models/chengfeng-test:/models/chengfeng-test"
+    # torch.compile output, keyed by VLLM_CACHE_ROOT below. Without this the
+    # cache lands inside the container and dies with it on --rm, so every step
+    # recompiles graphs a previous step already built. Build #15's Sequence
+    # Parallel step spent 34.75s on the first torch.compile and 9-12s on each
+    # subsequent engine init, across 45 cases - all of it repeated on the next
+    # run. Read-write, and shared between steps on purpose: the cache is keyed
+    # by graph and config, so hits across steps are exactly what we want.
+    #
+    # On /models rather than the root filesystem: this grows without bound as
+    # graph shapes accumulate, and the root filesystem is at 95% with 50G left.
+    # Safe to delete wholesale when it gets large - it only costs recompilation,
+    # which is the opposite of the model cache next door, where a delete means
+    # re-downloading tens of GB.
+    - "/models/chengfeng-ci/vllm-cache:/vllm-cache"
+    # Test assets (sample videos and images) that vllm.assets fetches at runtime.
+    # These do NOT live under HF_HOME or VLLM_CACHE_ROOT: assets/base.py resolves
+    # get_cache_dir() to ~/.cache/vllm/assets, which neither variable moves. So
+    # staging the file in the HF cache is not enough - the code looks somewhere
+    # else entirely, and under --rm that somewhere else is empty on every run.
+    #
+    # download_video_asset() checks `video_directory / filename` before calling
+    # hf_hub_download, so a plain file at the right path makes it skip the network
+    # instead of failing under HF_HUB_OFFLINE=1. Currently one asset is needed:
+    # VideoAsset("baby_reading") -> sample_demo_1.mp4, the only entry in that
+    # class's _NAME_TO_FILE map. Read-write because assets/base.py mkdirs it.
+    - "/models/chengfeng-ci/vllm-assets:/root/.cache/vllm/assets"
+    # The host already had a populated HF cache before this pipeline existed,
+    # holding several repos the tests want - including meta-llama/Llama-3.1-8B-Instruct
+    # (15G on disk) and Llama-3.2-1B-Instruct. Those are symlinked into the
+    # cache above rather than re-downloaded, so this mount is what keeps the
+    # links resolvable inside the container. Read-only: the directory belongs
+    # to other users and nothing here may write to it. If they delete a repo,
+    # the link dangles and that model has to be downloaded into
+    # chengfeng-test/hub like the rest.
+    - "/models/.cache/huggingface/hub:/models/.cache/huggingface/hub:ro"
+    # The GSM8K dataset, for the same reason as the assets above: the path is
+    # computed by the test, not configurable. gsm8k_eval.py:29 builds it as
+    # `os.path.join(tempfile.gettempdir(), url.split("/")[-1])` and no caller
+    # passes `filename`, so /tmp/train.jsonl and /tmp/test.jsonl are the only
+    # paths that work. Line 30 returns early when the file exists, which is the
+    # hook these mounts use.
+    #
+    # Why it matters: line 34 is `requests.get(url, stream=True)` with no
+    # timeout, against raw.githubusercontent.com through the image's
+    # HTTP_PROXY. No timeout means no upper bound - if the proxy hangs rather
+    # than refuses, the call waits forever. That is what happened to V1 e2e in
+    # build #40: 50m47s inside this one request, killed by the step timeout,
+    # having never reached engine init. HF_HUB_OFFLINE does not cover it -
+    # this is plain requests, not huggingface_hub. And because /tmp is fresh
+    # under --rm, every run re-rolled that dice.
+    #
+    # Single files, not the directory: mounting over /tmp would hide Ray's
+    # /tmp/ray object store and pytest's tmpdirs, and would put scratch writes
+    # on the shared disk. Read-only - the tests only read these back.
+    - "/models/chengfeng-ci/gsm8k/train.jsonl:/tmp/train.jsonl:ro"
+    - "/models/chengfeng-ci/gsm8k/test.jsonl:/tmp/test.jsonl:ro"
+    # Read-write, and inside the checkout: artifact_paths is resolved by the
+    # agent relative to the checkout, so the reports have to land there for the
+    # upload to find them. The other checkout mounts above are :ro.
+    - "$BUILDKITE_BUILD_CHECKOUT_PATH/test-reports:/vllm-workspace/test-reports"
+
+report:
+  # Where each step writes its JUnit XML. Must sit under the checkout the docker
+  # plugin mounts, otherwise artifact_paths cannot see it from the host.
+  junit_dir: /vllm-workspace/test-reports
+  # Absolute path to the guard script inside the container.
+  checker_path: /vllm-workspace/.buildkite/local-scripts/check_skip_ratio.py
+  # Buildkite artifact glob. Results are uploaded even when a step fails.
+  artifact_paths: "test-reports/**/*.xml"
+  # Fail a step when this fraction of its collected tests was skipped. A 4090
+  # skips every sm90+/sm100-gated test, and pytest exits 0 in that case, so
+  # without this check an all-skipped run looks green.
+  #
+  # Values must be calibrated per step on real hardware. Until then the check
+  # runs in warn-only mode.
+  skip_ratio_enforce: false
+  skip_ratio_default: 0.9

@@ -252,5 +252,11 @@ vllm/grpc/vllm_engine_pb2.py
 vllm/grpc/vllm_engine_pb2_grpc.py
 vllm/grpc/vllm_engine_pb2.pyi
 
-# Ignore generated cpu headers 
+# Ignore generated cpu headers
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+# Full pipeline dumps from .buildkite/local-scripts/gen_pipeline.py. Regenerable,
+# and they go stale whenever the config changes. The trimmed excerpt and the
+# README in output/ are tracked; these two are not.
+output/pipeline-*.sample.yaml
+output/selection-*.sample.txt
