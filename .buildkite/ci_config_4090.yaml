@@ -250,6 +250,47 @@ filter:
       # itself is sound and passes where CUDA is untouched at collection.
       - "tests/multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency"
 
+    multi-modal-processor-cpu:
+      # Four Mistral-format models, 3 hit_rate values each. These cannot pass
+      # while HF_HUB_OFFLINE=1, and not because anything is missing from the
+      # cache.
+      #
+      # is_mistral_model_repo() decides the format by asking whether the repo
+      # contains consolidated*.safetensors, and it asks through
+      # list_repo_files() -> hf_api().list_repo_files(), an HTTPS call to
+      # huggingface.co/api/models/<id>. That path only reads the local disk when
+      # the id is an existing filesystem path; a repo id goes to the Hub. Offline
+      # the call raises OfflineModeIsEnabled, repo_utils.py catches it and returns
+      # [], so the function is False for every repo regardless of what is cached.
+      # The models then fall back to the HF path with tokenizer_mode="mistral"
+      # and fail on "Mismatch in `image` token count ... ids=[0] and text=[75]".
+      #
+      # So downloading does not fix it: Ministral-3-3B's 4.67 GB
+      # consolidated.safetensors is staged and it still fails. (With
+      # VLLM_MODEL_REDIRECT_PATH mapping the id to its snapshot directory it does
+      # pass, because then the id *is* a path and the disk gets read - that is
+      # the mechanism, not a fix we want.)
+      #
+      # Worth being precise about what "unfixable" means here: these pass fine
+      # with HF_HUB_OFFLINE=0, since the probe can then reach the Hub. The reason
+      # not to do that is the shared disk (see HF_HUB_OFFLINE below), not a
+      # technical wall. If that tradeoff is ever revisited, delete this block.
+      #
+      # Note mistral-community/pixtral-12b is a different repo and passes; do not
+      # add it here.
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-mistralai/Ministral-3-3B-Instruct-2512]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-mistralai/Ministral-3-3B-Instruct-2512]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-mistralai/Ministral-3-3B-Instruct-2512]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-mistralai/Mistral-Small-3.1-24B-Instruct-2503]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-mistralai/Mistral-Small-3.1-24B-Instruct-2503]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-mistralai/Mistral-Small-3.1-24B-Instruct-2503]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.3-mistralai/Pixtral-12B-2409]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-0.5-mistralai/Pixtral-12B-2409]"
+      - "tests/models/multimodal/processing/test_common.py::test_processing_correctness[1.0-32-1.0-mistralai/Pixtral-12B-2409]"
+
   # Steps excluded regardless of the rules above. Keep a reason on each entry.
   step_denylist:
     # The PD scripts run an unfiltered `pkill -9 -f "vllm serve"`. Safe inside a
@@ -414,22 +455,45 @@ env:
   # "Cannot re-initialize CUDA in forked subprocess" either way - that one's
   # root cause is a WorkerProc background exception, still unidentified.
 
-  # Where the model mount lands. Kept on /models (a separate 3.5T NVMe with
-  # 1.5T free) because the root filesystem only has ~56G. Models are downloaded
-  # once and never deleted, so repeat runs are offline and fast.
+  # Where the model mount lands. Kept on /models (a separate 3.5T NVMe, ~1T free
+  # as of 2026-08-11 and shrinking as models are staged) because the root
+  # filesystem is tight. Models are downloaded once and never deleted, so repeat
+  # runs are offline and fast.
   #
   # /models itself is shared with other users' data, so only the
   # chengfeng-test subdirectory is mounted, never /models.
   HF_HOME: /models/chengfeng-test
 
-  # Models are pre-staged, so a cache miss is a staging bug. Failing fast beats
-  # silently pulling tens of GB mid-test and blowing the step's timeout.
+  # Two jobs, and the second one is the reason this is not merely a convenience.
   #
-  # Staging is not just downloading: the host cannot reach huggingface.co at all
-  # (DNS resolves, port 443 refused), so anything fetched has to go through
-  # HF_ENDPOINT=https://hf-mirror.com. Set HF_HUB_OFFLINE=0 and that endpoint
-  # when deliberately adding a model. Test runs never need the endpoint - they
-  # are fully offline.
+  # 1. Models are pre-staged, so a cache miss is a staging bug. Failing fast
+  #    beats silently pulling tens of GB mid-test and blowing the step's timeout.
+  #
+  # 2. It is the write gate on a shared disk. Multi-Modal Processor walks 400+
+  #    registry entries; today they cost kilobytes because only configs and
+  #    tokenizers are needed. Allow downloads and any cache miss pulls full
+  #    weights instead - Llama-4-Scout and Mistral-Large-3 are hundreds of GB
+  #    each. /models has ~1T free and 203G of it is other users' models, so a
+  #    runaway step does not just fail, it fills the disk under someone else's
+  #    work. Worse, it happens quietly: --rm discards the container but the
+  #    bytes stay in the mounted hub, and cleaning up afterwards means deleting
+  #    from a shared disk. Four entries under $HF_HOME/hub are still symlinks
+  #    into /models/.cache (opt-125m, Llama-3.2-1B-Instruct, Llama-3.1-8B-
+  #    Instruct, DeepSeek-V2-Lite); a write through one of those lands directly
+  #    in the read-only shared tree, which is how models--Qwen--Qwen3-8B picked
+  #    up six files it should never have had.
+  #
+  # On reachability, note the host and the container differ. The host cannot
+  # reach huggingface.co (DNS resolves, port 443 times out) and needs
+  # HF_ENDPOINT=https://hf-mirror.com, which is what the staging scripts use.
+  # Inside the container it is reachable: the image ships
+  # HTTP_PROXY=http://172.17.0.1:1081, a proxy on the host side of the docker
+  # bridge. So "we cannot reach the Hub from CI" is not true, and any offline
+  # failure that looks like a network problem is this variable instead. The
+  # reason not to switch it off is the shared disk above, not connectivity.
+  #
+  # To add a model deliberately, stage it on the host with HF_ENDPOINT set;
+  # test runs never need either variable.
   HF_HUB_OFFLINE: "1"
 
   # The serving images ship pytest but none of the test plugins upstream's
