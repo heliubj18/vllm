@@ -836,6 +836,27 @@ docker:
     # the link dangles and that model has to be downloaded into
     # chengfeng-test/hub like the rest.
     - "/models/.cache/huggingface/hub:/models/.cache/huggingface/hub:ro"
+    # The GSM8K dataset, for the same reason as the assets above: the path is
+    # computed by the test, not configurable. gsm8k_eval.py:29 builds it as
+    # `os.path.join(tempfile.gettempdir(), url.split("/")[-1])` and no caller
+    # passes `filename`, so /tmp/train.jsonl and /tmp/test.jsonl are the only
+    # paths that work. Line 30 returns early when the file exists, which is the
+    # hook these mounts use.
+    #
+    # Why it matters: line 34 is `requests.get(url, stream=True)` with no
+    # timeout, against raw.githubusercontent.com through the image's
+    # HTTP_PROXY. No timeout means no upper bound - if the proxy hangs rather
+    # than refuses, the call waits forever. That is what happened to V1 e2e in
+    # build #40: 50m47s inside this one request, killed by the step timeout,
+    # having never reached engine init. HF_HUB_OFFLINE does not cover it -
+    # this is plain requests, not huggingface_hub. And because /tmp is fresh
+    # under --rm, every run re-rolled that dice.
+    #
+    # Single files, not the directory: mounting over /tmp would hide Ray's
+    # /tmp/ray object store and pytest's tmpdirs, and would put scratch writes
+    # on the shared disk. Read-only - the tests only read these back.
+    - "/models/chengfeng-ci/gsm8k/train.jsonl:/tmp/train.jsonl:ro"
+    - "/models/chengfeng-ci/gsm8k/test.jsonl:/tmp/test.jsonl:ro"
     # Read-write, and inside the checkout: artifact_paths is resolved by the
     # agent relative to the checkout, so the reports have to land there for the
     # upload to find them. The other checkout mounts above are :ro.
